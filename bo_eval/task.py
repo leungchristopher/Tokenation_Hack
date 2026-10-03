@@ -14,10 +14,11 @@ def bo_eval(
     seed: int = 0,
     tolerance: float = 0.0,
     graph_dir: str = "logs/graphs",
+    max_searches: int = 6,
 ):
     return Task(
         dataset=[Sample(id=env, input=get_env(env).prompt(budget), metadata={"env": env})],
-        setup=init_bo(budget, seed),
+        setup=init_bo(budget, seed, max_searches),
         solver=SOLVERS[solver](),
         scorer=bo_scorer(tolerance, graph_dir),
     )

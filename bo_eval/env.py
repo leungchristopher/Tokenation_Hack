@@ -21,13 +21,17 @@ class TabularEnv:
     mean_col: str
     sd_col: str
     goal: str = "maximize"
+    log: tuple[str, ...] = ()
 
     @cached_property
     def X(self) -> np.ndarray:
         return self.df[self.params].to_numpy(float)
 
     def encode(self, X: np.ndarray) -> np.ndarray:
-        lo, hi = self.X.min(0), self.X.max(0)
+        """Scale each parameter to [0, 1]; parameters in `log` are scaled in log10."""
+        lg = np.isin(self.params, self.log)
+        X, ref = (np.where(lg, np.log10(np.maximum(a, 1e-12)), a) for a in (np.asarray(X, float), self.X))
+        lo, hi = ref.min(0), ref.max(0)
         return (X - lo) / np.where(hi > lo, hi - lo, 1.0)
 
     def index(self, params: dict) -> int:
@@ -68,14 +72,14 @@ class TabularEnv:
         )
 
     @classmethod
-    def from_csv(cls, name: str, file: str, description: str, mean_col: str, sd_col: str, params=None, goal: str = "maximize"):
+    def from_csv(cls, name: str, file: str, description: str, mean_col: str, sd_col: str, params=None, goal: str = "maximize", log=()):
         """Load a CSV of measured conditions; duplicate conditions are pooled."""
         df = pd.read_csv(DATA / file)
         params = params or [c for c in df.columns if c not in (mean_col, sd_col, "n")]
         df["_var"] = df[sd_col] ** 2
         df = df.groupby(params, as_index=False)[[mean_col, "_var"]].mean()
         df[sd_col] = np.sqrt(df.pop("_var"))
-        return cls(name, description, df, params, mean_col, sd_col, goal)
+        return cls(name, description, df, params, mean_col, sd_col, goal, tuple(log))
 
 
 _ICFREE = "split-GFP fluorescence yield (relative to the no-DNA control) of {} in an Echo-assembled cell-free reaction"
@@ -111,6 +115,7 @@ ENVS = {
         file="zimmer/a549_taxol_cis_dox.csv",
         description="the % survival of A549 lung cancer cells after 48 h with taxol, cisplatin and doxorubicin (doses in uM)",
         mean_col="survival_mean", sd_col="survival_sd", goal="minimize",
+        log=("taxol_uM", "cisplatin_uM", "doxorubicin_uM"),
     ),
 }
 

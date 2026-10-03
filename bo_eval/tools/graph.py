@@ -1,7 +1,6 @@
-from inspect_ai.tool import ToolError, tool
-from inspect_ai.util import store_as
+from inspect_ai.tool import tool
 
-from bo_eval.state import BOState, Edge
+from bo_eval.state import session, use_session
 
 
 @tool
@@ -14,13 +13,7 @@ def add_reasoning():
             target: Id of the node the reasoning leads to.
             reasoning: The inference linking the two nodes.
         """
-        s = store_as(BOState)
-        g = s.graph
-        for nid in (source, target):
-            if nid not in g.nodes:
-                raise ToolError(f"Unknown node '{nid}'.")
-        g.edges.append(Edge(source=source, target=target, reasoning=reasoning))
-        s.graph = g
+        use_session(lambda s: s.reason(source, target, reasoning))
         return f"Added edge {source} -> {target}."
 
     return execute
@@ -35,12 +28,7 @@ def close_branch():
             node: Id of the node at the top of the branch.
             reason: Why this branch cannot contain the optimum.
         """
-        s = store_as(BOState)
-        g = s.graph
-        if node not in g.nodes:
-            raise ToolError(f"Unknown node '{node}'.")
-        closed = g.close(node, reason)
-        s.graph = g
+        closed = use_session(lambda s: s.close(node, reason))
         return f"Closed: {', '.join(closed) or 'nothing (already closed)'}."
 
     return execute
@@ -49,7 +37,7 @@ def close_branch():
 @tool
 def view_graph():
     async def execute() -> str:
-        """View the reasoning graph: experiment nodes (inputs -> result), reasoning edges and closed branches."""
-        return store_as(BOState).graph.to_text()
+        """View the reasoning graph: experiment nodes (inputs -> result), reasoning edges, priors, evidence and closed branches."""
+        return session().graph.to_text()
 
     return execute
