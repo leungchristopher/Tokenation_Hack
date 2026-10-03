@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bo-eval"
 version = "0.1.0"
-description = "Portable Bayesian optimisation with cited, auditable reasoning graphs"
+description = "Two-task benchmark for epistemically aware experimental design"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["numpy", "pandas", "pydantic>=2", "scipy", "scikit-learn"]
@@ -13,14 +13,14 @@ dependencies = ["numpy", "pandas", "pydantic>=2", "scipy", "scikit-learn"]
 [project.optional-dependencies]
 inspect = ["inspect_ai", "httpx"]
 literature = ["httpx"]
-dev = ["pytest", "ruff", "mypy", "build"]
+model = ["httpx"]
+dev = ["pytest", "ruff", "mypy", "build", "httpx"]
 
 [tool.setuptools]
-packages = ["bo_eval", "bo_eval.tools"]
+packages = ["epistemic"]
 
 [tool.setuptools.data-files]
 "share/bo-eval/data" = ["data/upo_abts.csv"]
-"share/bo-eval/data/icfree" = ["data/icfree/cole1_pro.csv", "data/icfree/colm_pro.csv", "data/icfree/colm_eu.csv"]
 "share/bo-eval/data/zimmer" = ["data/zimmer/a549_taxol_cis_dox.csv"]
 
 [tool.ruff]
