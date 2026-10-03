@@ -10,7 +10,6 @@ from inspect_ai.util import store_as
 from bo_eval.amass import amass_search
 from bo_eval.core import Session, bo_loop, random_loop
 from bo_eval.dual import explore
-from bo_eval.memory import Memory
 from bo_eval.state import BOState, use_session
 from bo_eval.tools.research import web_literature
 from bo_eval.tools import add_reasoning, bayes_opt_suggest, close_branch, researcher, run_experiment, set_prior, submit, view_graph
@@ -77,8 +76,8 @@ def random_baseline():
 
 
 @solver
-def dual_solver(memory: str = "logs/memory.json"):
-    """System 1 (GP) / System 2 (LLM + literature) explorer with long-term memory; see bo_eval/dual.py."""
+def dual_solver():
+    """Dual spotlight: gated-prior GP (broad) + targeted literature search (narrow); see bo_eval/dual.py."""
     async def think(prompt: str) -> str:
         return (await get_model().generate(prompt)).completion
 
@@ -86,7 +85,7 @@ def dual_solver(memory: str = "logs/memory.json"):
         search = amass_search if os.environ.get("AMASS_API_KEY") else web_literature
         st = store_as(BOState)
         s = st.session
-        await explore(s, think, search, Memory.load(memory))
+        state.metadata["gates"] = await explore(s, think, search)
         st.session = s
         return state
 
