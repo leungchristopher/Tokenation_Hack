@@ -28,6 +28,8 @@ Ask = Callable[[str], Awaitable[str]]
 HYPOTHESISE = """You are planning experiments on {desc}. Goal: {goal}. Parameters and tested ranges: {ranges}.
 From your own domain knowledge, give at most {k} hypotheses about where the optimum lies that should change where
 to look first (optimal levels, interactions, antagonism, inhibition at high levels).
+Include at least one hypothesis that challenges the naive "more is better" view (antagonism, interactions,
+non-monotonic or narrow optima), and phrase its query to look for that evidence.
 Answer only JSON: {{"hypotheses": [{{"claim": "...", "query": "literature search query",
 "belief": {{"<param>": [best_value, width as a fraction of the range]}}}}]}}"""
 
@@ -64,7 +66,7 @@ async def hypothesise(s: Session, think: Ask, search: Ask) -> None:
             s.cite(h["claim"], **await calibrate(s, think, search, h["claim"], h["query"]), about=list(belief), belief=belief)
 
 
-async def explore(s: Session, think: Ask, search: Ask, refocus: float = 0.5) -> dict[str, float]:
+async def explore(s: Session, think: Ask, search: Ask, refocus: float = 0.3) -> dict[str, float]:
     """Run the budget; return each prior's learned gate (on the trust scale)."""
     await hypothesise(s, think, search)
     env, sign, gates, refocused = s.env, (1.0 if s.env.goal == "maximize" else -1.0), {}, set()
