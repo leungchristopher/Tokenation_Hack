@@ -53,38 +53,63 @@ class TabularEnv:
         return int(np.argmax(y) if self.goal == "maximize" else np.argmin(y))
 
     def prompt(self, budget: int) -> str:
-        levels = "\n".join(
-            f"- {p}: {sorted(self.df[p].unique().tolist())}" for p in self.params
-        )
+        def levels(p):
+            v = sorted(self.df[p].unique().tolist())
+            return v if len(v) <= 12 else f"{len(v)} levels in [{v[0]}, {v[-1]}]"
+
+        lines = "\n".join(f"- {p}: {levels(p)}" for p in self.params)
         return (
             f"Goal: {self.goal} {self.description}.\n"
-            f"Parameters and their available levels:\n{levels}\n"
+            f"Parameters and their available levels:\n{lines}\n"
             f"Only {len(self.df)} combinations are feasible; requested settings are snapped to the "
             f"nearest feasible condition. Measurements are noisy.\n"
             f"Experiment budget: {budget}. You are scored on finding the true optimum "
             f"using as few experiments as possible."
         )
 
+    @classmethod
+    def from_csv(cls, name: str, file: str, description: str, mean_col: str, sd_col: str, params=None):
+        """Load a CSV of measured conditions; duplicate conditions are pooled."""
+        df = pd.read_csv(DATA / file)
+        params = params or [c for c in df.columns if c not in (mean_col, sd_col, "n")]
+        df["_var"] = df[sd_col] ** 2
+        df = df.groupby(params, as_index=False)[[mean_col, "_var"]].mean()
+        df[sd_col] = np.sqrt(df.pop("_var"))
+        return cls(name, description, df, params, mean_col, sd_col)
 
-def _upo_abts() -> TabularEnv:
-    params = ["ph", "salt_conc", "cosubstrate_conc", "organic_solvent_conc", "temperature"]
-    df = pd.read_csv(DATA / "upo_abts.csv")
-    df["rate_var"] = df["rate_sd"] ** 2
-    df = df.groupby(params, as_index=False)[["rate_mean", "rate_var"]].mean()
-    df["rate_sd"] = np.sqrt(df.pop("rate_var"))
-    return TabularEnv(
-        name="upo_abts",
+
+_ICFREE = "split-GFP fluorescence yield (relative to the no-DNA control) of {} in an Echo-assembled cell-free reaction"
+
+# name -> TabularEnv.from_csv kwargs. To add a task, drop a CSV in data/ and add a line here.
+ENVS = {
+    "upo_abts": dict(
+        file="upo_abts.csv",
         description="the mean specific rate [U/mg] of unspecific peroxygenase (UPO) oxidising ABTS",
-        df=df,
-        params=params,
         mean_col="rate_mean",
         sd_col="rate_sd",
-    )
-
-
-ENVS = {"upo_abts": _upo_abts}
+        params=["ph", "salt_conc", "cosubstrate_conc", "organic_solvent_conc", "temperature"],
+    ),
+    "icfree_cole1": dict(
+        file="icfree/cole1_pro.csv",
+        description=_ICFREE.format("colicin E1 in E. coli lysate (proCFPS)"),
+        mean_col="yield_mean",
+        sd_col="yield_sd",
+    ),
+    "icfree_colm": dict(
+        file="icfree/colm_pro.csv",
+        description=_ICFREE.format("colicin M in E. coli lysate (proCFPS)"),
+        mean_col="yield_mean",
+        sd_col="yield_sd",
+    ),
+    "icfree_colm_eu": dict(
+        file="icfree/colm_eu.csv",
+        description="HiBiT luminescence yield of colicin M in HeLa lysate (euCFPS); concentrations are in X of the kit default",
+        mean_col="yield_mean",
+        sd_col="yield_sd",
+    ),
+}
 
 
 @cache
 def get_env(name: str) -> TabularEnv:
-    return ENVS[name]()
+    return TabularEnv.from_csv(name, **ENVS[name])
