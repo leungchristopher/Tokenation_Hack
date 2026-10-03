@@ -7,7 +7,7 @@ from inspect_ai.util import store_as
 
 from bo_eval.env import get_env
 from bo_eval.state import BOState
-from bo_eval.tools import add_reasoning, bayes_opt_suggest, close_branch, run_experiment, set_prior, submit, view_graph
+from bo_eval.tools import add_reasoning, bayes_opt_suggest, close_branch, researcher, run_experiment, set_prior, submit, view_graph
 from bo_eval.tools.bayes_opt import suggest
 from bo_eval.tools.experiment import run
 from bo_eval.tools.submit import submit_params
@@ -24,6 +24,12 @@ Before the first experiment, use set_prior to state where you expect the optimum
 knowledge of this system, with honest widths and the reasoning behind them. bayes_opt_suggest weights its
 suggestions by this prior. Revise it with set_prior when the results contradict it."""
 
+RESEARCH = """
+You have a research agent (researcher). Before the first experiment, ask it to survey the literature on this
+system and the parameters' effects and interactions; it records cited, trust-scored evidence (R nodes) and may set
+a prior that biases bayes_opt_suggest in proportion to its trust. Critique your plan against that evidence. Ask it
+again when a result surprises you or before closing a branch, and cite the evidence ids in your reasoning labels."""
+
 
 @solver
 def init_bo(budget: int, seed: int = 0):
@@ -35,13 +41,14 @@ def init_bo(budget: int, seed: int = 0):
     return solve
 
 
-def llm_agent(bo: bool = True, graph: bool = True, prior: bool = False):
+def llm_agent(bo: bool = True, graph: bool = True, prior: bool = False, research: bool = False):
     tools = [run_experiment()]
     tools += [bayes_opt_suggest()] if bo else []
     tools += [set_prior()] if prior else []
+    tools += [researcher()] if research else []
     tools += [add_reasoning(), close_branch(), view_graph()] if graph else []
     agent = react(
-        prompt=INSTRUCTIONS + (PRIOR if prior else ""),
+        prompt=INSTRUCTIONS + (PRIOR if prior else "") + (RESEARCH if research else ""),
         tools=tools,
         submit=AgentSubmit(tool=submit(), answer_only=True),
     )
@@ -92,6 +99,7 @@ def _submit_best():
 SOLVERS = {
     "react": lambda: llm_agent(bo=True, graph=True),
     "react_prior": lambda: llm_agent(bo=True, graph=True, prior=True),
+    "react_research": lambda: llm_agent(bo=True, graph=True, research=True),
     "react_no_bo": lambda: llm_agent(bo=False, graph=True),
     "react_no_graph": lambda: llm_agent(bo=True, graph=False),
     "bo": bo_baseline,

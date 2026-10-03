@@ -19,6 +19,18 @@ class Prior(BaseModel):
     after: str
     belief: dict[str, tuple[float, float]]
     reasoning: str
+    trust: float = 1.0
+
+
+class Evidence(BaseModel):
+    """A cited literature claim from the research agent, with how far it can be trusted for this system."""
+
+    id: str
+    claim: str
+    sources: list[str]
+    trust: float
+    trust_reason: str
+    about: list[str] = Field(default_factory=list)
 
 
 class Edge(BaseModel):
@@ -35,6 +47,7 @@ class ReasoningGraph(BaseModel):
     nodes: dict[str, Node] = Field(default_factory=_root)
     edges: list[Edge] = Field(default_factory=list)
     priors: list[Prior] = Field(default_factory=list)
+    evidence: list[Evidence] = Field(default_factory=list)
 
     @property
     def experiments(self) -> list[Node]:
@@ -66,7 +79,8 @@ class ReasoningGraph(BaseModel):
     def to_text(self) -> str:
         lines = [self._label(n) for n in self.nodes.values()]
         lines += [f"{e.source} -> {e.target}: {e.reasoning}" for e in self.edges]
-        lines += [f"{p.id} (set after {p.after}): {p.belief} because {p.reasoning}" for p in self.priors]
+        lines += [f"{p.id} (set after {p.after}, trust {p.trust:g}): {p.belief} because {p.reasoning}" for p in self.priors]
+        lines += [f"{v.id} [trust {v.trust:g}] {v.claim} ({'; '.join(v.sources)}) re {v.about}: {v.trust_reason}" for v in self.evidence]
         closed = [f"{n.id}: {n.closed_reason}" for n in self.nodes.values() if n.closed]
         if closed:
             lines += ["Closed branches:"] + closed
@@ -88,6 +102,12 @@ class ReasoningGraph(BaseModel):
             b = "<br/>".join(f"{k}≈{v:g}±{w:g}" for k, (v, w) in p.belief.items())
             lines.append(f'  {p.id}[/"{p.id}<br/>{b}"/]')
             lines.append(f'  {p.after} -.->|"{q(p.reasoning)}"| {p.id}')
+        for v in self.evidence:
+            lines.append(f'  {v.id}{{{{"{v.id} trust {v.trust:g}<br/>{q(v.claim)}<br/><i>{q("; ".join(v.sources))}</i>"}}}}')
+            lines += [f"  {v.id} -.- {a}" for a in v.about if a in self.nodes or any(a == p.id for p in self.priors)]
+        if self.evidence:
+            lines.append("  classDef evidence fill:#fff4dd,stroke:#c80")
+            lines.append(f"  class {','.join(v.id for v in self.evidence)} evidence")
         if self.priors:
             lines.append("  classDef prior fill:#e8f0ff,stroke:#36c")
             lines.append(f"  class {','.join(p.id for p in self.priors)} prior")

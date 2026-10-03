@@ -16,7 +16,9 @@ def prior_weight(env, C: np.ndarray, belief: dict) -> np.ndarray:
     logp = np.zeros(len(C))
     for k, (best, width) in belief.items():
         j = env.params.index(k)
-        x = env.encode(np.array([[best if i == j else 0.0 for i in range(len(env.params))]]))[0, j]
+        ref = env.X[:1].copy()
+        ref[0, j] = best
+        x = env.encode(ref)[0, j]
         logp -= 0.5 * ((C[:, j] - x) / max(width, 1e-3)) ** 2
     return np.exp(logp - logp.max())
 
@@ -24,13 +26,14 @@ def prior_weight(env, C: np.ndarray, belief: dict) -> np.ndarray:
 def suggest(n: int = 1, xi: float = 0.01, avoid_closed: bool = True, beta: float = 10.0) -> list[dict]:
     """GP + expected improvement over all feasible, not-yet-run conditions.
 
-    If the LLM has set a prior, EI is weighted by pi(x)^(beta/n) (piBO, Hvarfner et al. 2022),
+    If the LLM has set a prior, EI is weighted by pi(x)^(beta*trust/n) (piBO, Hvarfner et al. 2022),
     so domain knowledge dominates early and the GP takes over as data accumulates.
     """
     s = store_as(BOState)
     env, exps = get_env(s.env), s.graph.experiments
     C = env.encode(env.X)
-    pi = prior_weight(env, C, s.graph.priors[-1].belief) if s.graph.priors else None
+    prior = s.graph.priors[-1] if s.graph.priors else None
+    pi = prior_weight(env, C, prior.belief) if prior else None
     run_idx = [env.index(e.params) for e in exps]
     mask = np.ones(len(C), bool)
     mask[run_idx] = False
@@ -51,7 +54,7 @@ def suggest(n: int = 1, xi: float = 0.01, avoid_closed: bool = True, beta: float
     mu, sd = gp.predict(C, return_std=True)
     z = (mu - y.max() - xi) / np.maximum(sd, 1e-9)
     ei = (mu - y.max() - xi) * norm.cdf(z) + sd * norm.pdf(z)
-    acq = ei if pi is None else ei * pi ** (beta / len(exps))
+    acq = ei if pi is None else ei * pi ** (beta * prior.trust / len(exps))
 
     if avoid_closed:
         nearest = ((C[:, None, :] - Xo[None]) ** 2).sum(-1).argmin(1)
