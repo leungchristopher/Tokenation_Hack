@@ -1,8 +1,4 @@
-"""A minimal benchmark for epistemically aware experimental design.
-
-Two measured tasks, one sequential loop, three selection policies, and an
-append-only evidence graph that separates tool outputs from model interpretation.
-"""
+"""One GP-BO loop with optional evidence annotation and auditable graph exports."""
 
 from epistemic.graph import EvidenceGraph
 from epistemic.loop import Config, Episode, run_episode

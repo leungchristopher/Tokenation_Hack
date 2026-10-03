@@ -20,13 +20,11 @@ from epistemic.tasks import load_task
 
 @task
 def experimental_design(
-    task_name: str = "drug", policy: str = "bo_evidence", budget: int = 8, seed: int = 0,
-    provider: str = "inspect", execution: str = "perfect", feedback: str = "true",
-    flat: bool = False, misleading: bool = False, graph_dir: str = "logs/inspect-graphs",
+    task_name: str = "drug", budget: int = 8, seed: int = 0,
+    provider: str = "none", execution: str = "perfect", graph_dir: str = "logs/current-inspect",
     max_searches: int = 0, evidence_file: str | None = None,
 ) -> Task:
-    config = Config(task=task_name, policy=policy, budget=budget, seed=seed, provider=provider,
-                    execution=execution, feedback=feedback, with_edges=not flat, misleading_evidence=misleading,
+    config = Config(task=task_name, budget=budget, seed=seed, provider=provider, execution=execution,
                     max_searches=max_searches, evidence_file=evidence_file)
     spec, _ = load_task(task_name)
 
@@ -34,7 +32,7 @@ def experimental_design(
     def sequential_episode():
         async def solve(state: TaskState, generate: Generate) -> TaskState:
             settings = Config(**(vars(config) | {"seed": seed + state.epoch - 1}))
-            if provider == "inspect" and policy in ("llm", "bo_evidence"):
+            if provider == "inspect":
                 model = get_model()
                 loop = asyncio.get_running_loop()
                 generation = model._resolve_config(GenerateConfig(
@@ -63,10 +61,10 @@ def experimental_design(
                                                    model_revision=os.getenv("EPISTEMIC_MODEL_REVISION", "unspecified"),
                                                    inference_stack=f"inspect_ai {version('inspect_ai')}")
             else:
-                backend = get_provider(provider if provider != "inspect" else "mock", seed=settings.seed)
+                backend = get_provider(provider, seed=settings.seed)
             episode = await asyncio.to_thread(run_episode, settings, backend)
             if graph_dir:
-                export(episode, f"{graph_dir}/{task_name}-{policy}-{state.sample_id}-epoch{state.epoch}")
+                export(episode, f"{graph_dir}/{task_name}-{state.sample_id}-epoch{state.epoch}")
             state.metadata["metrics"] = episode_metrics(episode)
             state.metadata["provider"] = episode.provider_metadata
             state.output.completion = episode.final_selection() or "no valid experiment"

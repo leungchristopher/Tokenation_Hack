@@ -159,21 +159,7 @@ def external_evidence(graph: EvidenceGraph) -> dict:
     ).model_dump(mode="json")
 
 
-MISLEADING = {
-    "enzyme": "The highest activity occurs at the maximum measured temperature.",
-    "drug": "The lowest survival always occurs at the highest dose of all three drugs together.",
-}
-
-
-def in_misleading_region(task: TaskSpec, params: dict[str, float]) -> bool:
-    """The region the benchmark-generated claim points at, used only to decide contradiction."""
-    bounds = task.bounds()
-    if task.name.startswith("drug"):
-        return all(params[name] >= bounds[name][1] for name in task.names)
-    return params["temperature"] >= bounds["temperature"][1]
-
-
-def seed_graph(task: TaskSpec, misleading: bool = False, evidence_file: str | None = None) -> EvidenceGraph:
+def seed_graph(task: TaskSpec, evidence_file: str | None = None) -> EvidenceGraph:
     graph = EvidenceGraph()
     source = graph.add_evidence(EvidenceRecord(
         id="E0", title=f"{task.name} dataset contract", reference=task.provenance, source="dataset",
@@ -205,15 +191,4 @@ def seed_graph(task: TaskSpec, misleading: bool = False, evidence_file: str | No
                   "Small-sample fits are not guaranteed to be calibrated.",
         scope=f"numerical model for {task.name}",
     ))
-    if misleading:
-        key = "drug" if task.name.startswith("drug") else "enzyme"
-        graph.add_claim(Claim(
-            id="K9",
-            statement=MISLEADING[key],
-            scope=task.name,
-            source="model_conjecture",
-            reference="benchmark-generated evaluator metadata; not a publication",
-            benchmark_generated=True,
-            discriminating_result="A measured candidate outside that region with a better objective value.",
-        ))
     return graph

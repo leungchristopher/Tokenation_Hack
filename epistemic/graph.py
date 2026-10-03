@@ -75,6 +75,7 @@ class Observation(BaseModel):
     value_shown: float | None
     outcome_unit: str
     simulated: bool = True
+    measurement_noise: bool = True
     kind: Literal["observation"] = "observation"
 
     @field_validator("intended_params", "execution")
@@ -135,11 +136,10 @@ class Decision(BaseModel):
     targeted_uncertainty: Literal["response", "execution", "model", "evidence"] = "response"
     justification: str = ""
     prediction: float | None = None
-    prediction_source: Literal["llm", "numerical_model", "unavailable"] = "unavailable"
+    prediction_source: Literal["numerical_model", "unavailable"] = "unavailable"
     search_query: str | None = None
     implications: str = ""
-    policy: str = "random"
-    valid_llm_output: bool | None = None
+    policy: str = "gp_bo"
     kind: Literal["decision"] = "decision"
 
 

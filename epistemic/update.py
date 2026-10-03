@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from epistemic.evidence import in_misleading_region
 from epistemic.graph import Claim, EvidenceGraph, Observation, UncertaintyKind, UncertaintyRecord
 from epistemic.surrogate import ResponseUncertainty
 from epistemic.tasks import TaskSpec
@@ -21,7 +20,8 @@ def update_state(graph: EvidenceGraph, task: TaskSpec, observation: Observation,
         return
     uncertainty_ids = []
     descriptions: tuple[tuple[UncertaintyKind, str], ...] = (
-        ("response", task.noise.description),
+        ("response", task.noise.description if observation.measurement_noise else
+         "Simulated measurement noise is disabled in this control. This is not evidence of noise-free real experiments."),
         ("execution", f"Reported execution model: {observation.execution.get('execution_model', 'unspecified')}. "
          "Delivery reports and hidden realised conditions must not be conflated."),
         ("model", "No fitted pre-experiment forecast was available." if prediction is None else
@@ -88,19 +88,3 @@ def update_state(graph: EvidenceGraph, task: TaskSpec, observation: Observation,
     for claim_id in updated:
         for uncertainty_id in uncertainty_ids:
             graph.link(uncertainty_id, claim_id, "qualifies")
-
-    for claim in list(graph.claims.values()):
-        if claim.benchmark_generated and claim.status != "contradicted":
-            params = task.params_of(observation.candidate_id)
-            claimed_region = [o for o in graph.observations.values()
-                              if in_misleading_region(task, o.intended_params) and o.value_shown is not None]
-            best_inside = (max if task.direction == "maximize" else min)(
-                claimed_region, key=lambda o: o.value_shown or 0.0, default=None)
-            if not in_misleading_region(task, params) and best_inside is not None and _better(
-                task, value, best_inside.value_shown or 0.0
-            ):
-                graph.revise(claim.id, round, "contradicted",
-                             "a shown result outside the claimed region beats one inside it; "
-                             "this noisy comparison is not proof about all unmeasured settings",
-                             [observation.id, best_inside.id])
-                graph.link(observation.id, claim.id, "contradicts")

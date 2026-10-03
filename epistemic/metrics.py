@@ -9,7 +9,8 @@ from epistemic.tasks import load_task
 
 
 def episode_metrics(episode: Episode) -> dict:
-    task, evaluator = load_task(episode.config.task)
+    evaluator = episode.evaluator or load_task(episode.config.task)[1]
+    task = episode.task
     truths = [step["true_value"] for step in episode.hidden]
     best = (max(truths) if task.direction == "maximize" else min(truths)) if truths else None
     selection = episode.final_selection()
@@ -20,25 +21,26 @@ def episode_metrics(episode: Episode) -> dict:
         shown = episode.hidden[round - 1]["true_value"]
         errors.append(abs(shown - prediction["mean"]))
         covered.append(prediction["interval"][0] <= shown <= prediction["interval"][1])
-    invalid = sum(1 for s in episode.trajectory if s["llm"]["valid_output"] is False)
     return {
         "task": episode.config.task,
-        "policy": episode.config.policy,
-        "feedback": episode.config.feedback,
+        "acquisition": episode.config.acquisition,
+        "evidence_enabled": episode.config.with_evidence,
+        "observation_noise": episode.config.observation_noise,
         "execution": episode.config.execution,
         "experiments": len(episode.hidden),
         "completed_budget": len(episode.hidden) == episode.config.budget,
         "best_true_value": best,
         "best_true_regret": min((s["regret"] for s in episode.hidden), default=None),
         "final_selection": selection,
+        "final_result": episode.final_result(),
+        "best_observed_value": (episode.final_result() or {}).get("value_shown"),
         "final_selection_regret": evaluator.regret(selection) if selection else None,
+        "final_intended_mean": evaluator.truth(selection) if selection else None,
         "found_optimum": any(s["realised_id"] == evaluator.optimum_id for s in episode.hidden),
         "predictive_mae_vs_truth": float(np.mean(errors)) if errors else None,
         "interval_coverage_vs_truth": float(np.mean(covered)) if covered else None,
-        "invalid_llm_selections": invalid,
-        "invalid_llm_attempts": sum(len(s["llm"]["failures"]) for s in episode.trajectory),
         "rejected_evidence_outputs": sum(
-            1 for s in episode.trajectory if s["llm"].get("evidence_valid") is False),
+            1 for s in episode.trajectory if s["evidence_annotation"]["valid"] is False),
         "best_true_objective_curve": [
             (max if task.direction == "maximize" else min)(truths[:i + 1]) for i in range(len(truths))],
         "contradictions": len(episode.graph.contradictions()),
@@ -51,17 +53,3 @@ def episode_metrics(episode: Episode) -> dict:
             if (step.get("literature_search") or {}).get("status") in ("success", "failed")
         ),
     }
-
-
-def recovery_round(episode: Episode, fault_round: int, tolerance: float = 0.25) -> int | None:
-    """Rounds until a NEW experiment has regret within 0.25 of the pre-fault best true regret.
-
-    Defined before running: a return of None means no recovery within the budget.
-    """
-    baseline = min((s["regret"] for s in episode.hidden if s["round"] < fault_round), default=None)
-    if baseline is None:
-        return None
-    for step in episode.hidden:
-        if step["round"] > fault_round and step["regret"] <= baseline + tolerance:
-            return int(step["round"] - fault_round)
-    return None

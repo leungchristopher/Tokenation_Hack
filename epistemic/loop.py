@@ -15,44 +15,35 @@ import numpy as np
 from epistemic.evidence import ingest_literature, seed_graph
 from epistemic.execution import execution_model
 from epistemic.graph import Claim, Decision, EvidenceGraph, Observation, UncertaintyKind, UncertaintyRecord
-from epistemic.policies import POLICIES, Proposal, SelectionError
+from epistemic.policies import EvidenceAnnotator, Proposal, select
 from epistemic.provider import Provider, get_provider
 from epistemic.source_filter import accessible_result, excluded_source
 from epistemic.surrogate import Surrogate
 from epistemic.tasks import Evaluator, TaskSpec, load_task
 from epistemic.update import update_state
 
-FEEDBACK = ("true", "missing", "corrupted")
-
 
 @dataclass
 class Config:
     task: str = "drug"
-    policy: str = "bo"
     budget: int = 12
     seed: int = 0
     execution: str = "perfect"
-    feedback: str = "true"
-    misleading_evidence: bool = False
+    acquisition: str = "ei"
+    observation_noise: bool = True
+    with_evidence: bool = True
     with_edges: bool = True
-    with_model_advice: bool = True
-    provider: str = "mock"
-    corruption_scale: float = 0.5
-    fault_round: int | None = None
-    fault_scale: float = 1.5
+    provider: str = "none"
     temperature: float = 0.0
     evidence_file: str | None = None
     max_searches: int = 0
+    max_evidence_calls: int = 3
 
     def __post_init__(self) -> None:
-        if self.feedback not in FEEDBACK:
-            raise ValueError(f"feedback must be one of {FEEDBACK}")
-        if self.budget < 0 or self.seed < 0 or self.max_searches < 0:
-            raise ValueError("budget and seed must be non-negative")
-        if self.fault_round is not None and not 1 <= self.fault_round <= self.budget:
-            raise ValueError("fault_round must lie within the episode budget")
-        if min(self.fault_scale, self.corruption_scale, self.temperature) < 0:
-            raise ValueError("fault, corruption and decoding scales must be non-negative")
+        if self.acquisition not in ("ei", "random") or self.execution not in ("perfect", "perturbed"):
+            raise ValueError("Use ei/random acquisition and perfect/perturbed execution.")
+        if min(self.budget, self.seed, self.max_searches, self.max_evidence_calls, self.temperature) < 0:
+            raise ValueError("Budgets, seed and temperature must be non-negative.")
 
 
 @dataclass
@@ -64,6 +55,7 @@ class Episode:
     hidden: list[dict] = field(default_factory=list)
     provider_metadata: dict[str, Any] = field(default_factory=dict)
     evaluator_provenance: str = ""
+    evaluator: Evaluator | None = field(default=None, repr=False)
 
     @property
     def decisions(self) -> list[Decision]:
@@ -76,12 +68,29 @@ class Episode:
         return max(values) if self.task.direction == "maximize" else min(values)
 
     def final_selection(self) -> str | None:
-        """What the agent would report: the executed candidate with the best value it was shown."""
-        shown = [(o.value_shown, o.candidate_id) for o in self.graph.observations.values() if o.value_shown is not None]
+        result = self.final_result()
+        return result["candidate_id"] if result else None
+
+    def final_result(self) -> dict[str, Any] | None:
+        shown = [o for o in self.graph.observations.values() if o.value_shown is not None]
         if not shown:
-            return self.decisions[-1].candidate_id if self.decisions else None
-        pick = max(shown) if self.task.direction == "maximize" else min(shown)
-        return pick[1]
+            return None
+        pick = (max if self.task.direction == "maximize" else min)(shown, key=lambda o: float(o.value_shown or 0.0))
+        return {
+            "candidate_id": pick.candidate_id,
+            "observation_id": pick.id,
+            "value_shown": pick.value_shown,
+            "outcome_unit": self.task.outcome_unit,
+            "rule": f"Greedy {self.task.direction} over observed results; ties keep the earliest experiment.",
+            "uncertainty": (
+                "Best observed, not a proven optimum. Observation noise can misrank candidates; "
+                "execution may differ from intended settings. No hidden dataset means or GP forecasts "
+                "are used for final selection."
+            ),
+            "uncertainty_records": [
+                u.id for u in self.graph.uncertainties.values() if pick.id in u.evidence
+            ],
+        }
 
     def save(self, directory: str | Path) -> Path:
         out = Path(directory)
@@ -93,47 +102,34 @@ class Episode:
             for step in self.hidden:
                 handle.write(json.dumps(step) + "\n")
         (out / "graph.json").write_text(self.graph.model_dump_json(indent=2))
+        (out / "final.json").write_text(json.dumps(self.final_result(), indent=2))
         (out / "config.json").write_text(json.dumps({**asdict(self.config), "provider": self.provider_metadata}, indent=2))
         (out / "hidden_provenance.json").write_text(json.dumps({"source": self.evaluator_provenance}, indent=2))
         return out
 
 
-def _corrupt(task: TaskSpec, evaluator: Evaluator, candidate_id: str, value: float,
-             rng: np.random.Generator, scale: float) -> float:
-    """Show the agent the result of a different measured candidate; evaluator truth is unchanged."""
-    other = task.ids()[int(rng.integers(len(task.ids())))]
-    return float(value + scale * (evaluator.truth(other) - value))
-
-
 def run_episode(config: Config, provider: Provider | None = None,
-                initial: list[str] | None = None, stop_after: int | None = None,
-                literature_search: Callable[[str], dict] | None = None) -> Episode:
-    task, evaluator = load_task(config.task)
+                initial: list[str] | None = None, literature_search: Callable[[str], dict] | None = None,
+                domain: tuple[TaskSpec, Evaluator] | None = None) -> Episode:
+    task, evaluator = domain or load_task(config.task)
     provider = provider or get_provider(config.provider, seed=config.seed, temperature=config.temperature)
-    policy = POLICIES[config.policy](task=task, provider=provider, with_edges=config.with_edges,
-                                     with_model_advice=config.with_model_advice, budget=config.budget,
-                                     max_searches=config.max_searches)
-    graph = seed_graph(task, misleading=config.misleading_evidence, evidence_file=config.evidence_file)
-    episode = Episode(config, task, graph, provider_metadata=provider.metadata(), evaluator_provenance=evaluator.provenance)
+    annotator = EvidenceAnnotator(task, provider, config.budget, config.max_searches,
+                                 config.max_evidence_calls, config.with_edges)
+    graph = seed_graph(task, evidence_file=config.evidence_file if config.with_evidence else None)
+    episode = Episode(config, task, graph, provider_metadata=provider.metadata(),
+                      evaluator_provenance=evaluator.provenance, evaluator=evaluator)
     executor = execution_model(task, config.execution)
     surrogate = Surrogate(task, seed=config.seed).fit([])
     rng = np.random.default_rng(np.random.SeedSequence([config.seed, 0]))
-    rounds = config.budget if stop_after is None else min(config.budget, stop_after)
+    rounds = config.budget
     searches = 0
     for round in range(1, rounds + 1):
         history = [(o.candidate_id, o.value_shown) for o in graph.observations.values() if o.value_shown is not None]
         forced = initial[round - 1] if initial and round <= len(initial) else None
-        try:
-            proposal = (Proposal(forced, rationale="matched initial experiment") if forced
-                        else policy.propose(graph, surrogate, history, rng, round))
-        except SelectionError as error:
-            episode.trajectory.append({
-                "round": round, "state_available_to_agent": graph.view(round, with_edges=config.with_edges),
-                "prompt": getattr(policy, "last_prompt", None), "action": None,
-                "llm": {"valid_output": False, "attempts": len(error.failures), "failures": error.failures},
-                "status": "stopped_after_invalid_output",
-            })
-            break
+        proposal = (Proposal(forced, rationale="Matched initial experiment.") if forced
+                    else select(task, graph, surrogate, rng, config.acquisition))
+        if config.with_evidence and provider.name != "none":
+            annotator.annotate(proposal, graph, surrogate, round)
         prediction = surrogate.response(proposal.candidate_id) if history else None
         state_view = graph.view(round, with_edges=config.with_edges)
         state_view["literature_searches_remaining"] = config.max_searches - searches
@@ -174,17 +170,14 @@ def run_episode(config: Config, provider: Provider | None = None,
             claims=[e for e in proposal.evidence if e in graph.claims],
             evidence=proposal.evidence,
             assumptions=proposal.assumptions or [e for e in proposal.evidence if e in graph.assumptions],
-            targeted_uncertainty=proposal.targeted_uncertainty,
+            targeted_uncertainty="response",
             justification=proposal.rationale,
             prediction=proposal.prediction if proposal.prediction is not None else
             (prediction.mean if prediction else None),
-            prediction_source="llm" if proposal.valid_llm_output else
-                              ("numerical_model" if proposal.prediction is not None or prediction is not None
-                               else "unavailable"),
+            prediction_source="numerical_model" if prediction is not None else "unavailable",
             search_query=proposal.search_query,
-            implications=proposal.implications or
-                         "Outside the interval, execution, noise and model form are all candidate explanations.",
-            policy=policy.name, valid_llm_output=proposal.valid_llm_output,
+            implications="Outside the interval, execution, noise and model form are all candidate explanations.",
+            policy="gp_bo",
         ))
         for claim_id in decision.claims:
             graph.link(decision.id, claim_id, "depends_on", "Declared evidence dependency, not causal attribution.")
@@ -194,26 +187,16 @@ def run_episode(config: Config, provider: Provider | None = None,
             if evidence_id not in decision.claims and evidence_id not in decision.assumptions:
                 graph.link(decision.id, evidence_id, "depends_on", "Accessible evidence used in this decision.")
 
-        executor = execution_model(task, config.execution,
-                                   config.fault_scale if config.fault_round == round else 0.15)
-        if config.fault_round == round:
-            executor = execution_model(task, "perturbed", config.fault_scale)
         record = executor.run(proposal.candidate_id, np.random.default_rng(np.random.SeedSequence([config.seed, round, 1])))
         true_value = evaluator.truth(record.realised_id)
-        measured = evaluator.observe(record.realised_id, np.random.default_rng(np.random.SeedSequence([config.seed, round, 2])))
-        if config.feedback == "missing":
-            shown: float | None = None
-        elif config.feedback == "corrupted":
-            shown = _corrupt(task, evaluator, record.realised_id, measured,
-                             np.random.default_rng(np.random.SeedSequence([config.seed, round, 3])), config.corruption_scale)
-        else:
-            shown = measured
+        shown = (evaluator.observe(record.realised_id, np.random.default_rng(np.random.SeedSequence([config.seed, round, 2])))
+                 if config.observation_noise else true_value)
 
         observation = graph.add_observation(Observation(
             id=f"O{round}", round=round, candidate_id=proposal.candidate_id,
             intended_params=record.intended_params, execution=record.accessible(),
             value_shown=shown,
-            outcome_unit=task.outcome_unit, simulated=True,
+            outcome_unit=task.outcome_unit, simulated=True, measurement_noise=config.observation_noise,
         ))
         graph.link(decision.id, observation.id, "tests", "the experiment this decision ran")
         if shown is not None:
@@ -223,12 +206,12 @@ def run_episode(config: Config, provider: Provider | None = None,
                            if o.value_shown is not None])
             update_state(graph, task, observation, prediction, round)
 
-        retrieval = None
+        retrieval: dict[str, Any] | None = None
         if proposal.search_query:
             retrieval = {"query": proposal.search_query, "status": "budget_exhausted"}
             if searches < config.max_searches and round < rounds:
                 searches += 1
-                policy.searches_remaining = config.max_searches - searches
+                annotator.searches_remaining = config.max_searches - searches
                 start = time.perf_counter()
                 try:
                     if excluded_source(proposal.search_query):
@@ -259,7 +242,7 @@ def run_episode(config: Config, provider: Provider | None = None,
         episode.trajectory.append({
             "round": round,
             "state_available_to_agent": state_view,
-            "prompt": getattr(policy, "last_prompt", None),
+            "prompt": annotator.last_prompt,
             "action": decision.model_dump(),
             "epistemic_interpretations": [u.model_dump() for u in proposal.claim_updates],
             "literature_search": retrieval,
@@ -274,16 +257,14 @@ def run_episode(config: Config, provider: Provider | None = None,
                 "contradictions": len(graph.contradictions()),
                 "model_uncertainty": asdict(surrogate.model_uncertainty()),
             },
-            "llm": {"valid_output": proposal.valid_llm_output, "attempts": proposal.attempts,
-                    "failures": proposal.failures, "evidence_valid": proposal.evidence_valid},
+            "evidence_annotation": {"valid": proposal.evidence_valid, "failures": proposal.failures},
         })
         episode.hidden.append({
             "round": round, "intended_id": record.intended_id, "realised_id": record.realised_id,
             "realised_params": record.realised_params, "true_value": true_value,
             "clipped_continuous_params": record.continuous_params or record.realised_params,
-            "measured_value": measured, "shown_value": shown, "feedback_mode": config.feedback,
+            "measured_value": shown,
             "regret": evaluator.regret(record.realised_id),
-            "seeded_execution_fault": config.fault_round == round,
             "execution_mapping_changed": record.realised_id != record.intended_id,
         })
     episode.provider_metadata = provider.metadata() | {

@@ -42,6 +42,8 @@ def export(episode: Episode, directory: str | Path) -> Path:
     (out / "metrics.json").write_text(json.dumps(episode_metrics(episode), indent=2))
     (out / "evidence.svg").write_text(to_evidence_svg(episode))
     (out / "experiments.svg").write_text(to_experiment_svg(episode))
+    (out / "actions.json").write_text(json.dumps(actions_graph(episode), indent=2))
+    (out / "actions.svg").write_text(to_actions_svg(episode))
     (out / "graph.svg").write_text(to_svg(episode))
     (out / "graph.html").write_text(to_html(episode))
     (out / "audit.md").write_text(to_markdown(episode))
@@ -455,18 +457,94 @@ def to_experiment_svg(episode: Episode) -> str:
                      "Chronological experiment graph with decision reasoning, dependencies and observations.")
 
 
+def actions_graph(episode: Episode) -> dict:
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    observations = sorted(episode.graph.observations.values(), key=lambda o: o.round)
+    for observation in observations:
+        decision = episode.graph.decisions[f"D{observation.round}"]
+        step = episode.trajectory[observation.round - 1]
+        nodes.append({
+            "id": decision.id, "kind": "action", "round": decision.round,
+            "candidate_id": decision.candidate_id, "parameters": observation.intended_params,
+            "observation": observation.model_dump(mode="json"),
+            "forecast": step.get("pre_experiment_prediction"),
+            "uncertainty_records": [
+                u.model_dump(mode="json") for u in episode.graph.uncertainties.values()
+                if observation.id in u.evidence
+            ],
+            "data_used": [o.id for o in observations if o.round < observation.round],
+            "rationale": decision.justification,
+        })
+        if len(nodes) > 1:
+            edges.append({
+                "source": nodes[-2]["id"], "target": decision.id, "kind": "reasoning",
+                "reason": decision.justification,
+                "qualification": "Chronology, not causation. The GP is refitted using all prior observed results.",
+            })
+    result = episode.final_result()
+    if result:
+        nodes.append({"id": "Final", "kind": "selection", **result})
+        source = next(n["id"] for n in nodes if n.get("observation", {}).get("id") == result["observation_id"])
+        edges.append({"source": source, "target": "Final", "kind": "reasoning", "reason": result["rule"],
+                      "qualification": result["uncertainty"]})
+    return {"nodes": nodes, "edges": edges}
+
+
+def _actions_parts(episode: Episode) -> tuple[str, int]:
+    graph = actions_graph(episode)
+    parts: list[str] = []
+    _text(parts, 32, 40, "Actions and reasoning", "title")
+    _text(parts, 32, 66, "Action nodes contain observed results. Edge labels explain the next choice. No hidden means.", "muted")
+    positions = {}
+    for index, node in enumerate(graph["nodes"]):
+        y = 110 + index * 310
+        positions[node["id"]] = y
+        if node["kind"] == "selection":
+            title = f"Final · {node['candidate_id']} · {node['value_shown']:.6g} {node['outcome_unit']}"
+            lines = _wrap(node["rule"], 84, 2) + _wrap(node["uncertainty"], 84, 4)
+            badges = []
+        else:
+            observation, forecast = node["observation"], node["forecast"]
+            title = f"Trial {node['round']} · {node['candidate_id']}"
+            lines = _wrap(", ".join(f"{k}={v:g}" for k, v in node["parameters"].items()), 84, 3)
+            value = observation["value_shown"]
+            lines += [f"Observed: {value:g} {observation['outcome_unit']}" if value is not None else "No observed result."]
+            lines += [f"Execution: {observation['execution'].get('execution_model', 'unspecified')}; "
+                      f"measurement noise {'enabled' if observation['measurement_noise'] else 'disabled'}."]
+            lines += ([f"GP predictive interval [{forecast['interval'][0]:.5g}, {forecast['interval'][1]:.5g}]; "
+                       "calibration not established."] if forecast else ["GP forecast: unavailable before the first experiment."])
+            badges = [(u["category"], u["status"]) for u in node["uncertainty_records"]]
+        _node(parts, record_id=node["id"], dom_id=f"action-{node['id']}", x=32, y=y, width=730, height=218,
+              title=title, lines=lines, footer="Select for complete inputs, result and uncertainty.",
+              detail=_detail(node), css="observation", badges=badges)
+    for edge in graph["edges"]:
+        sy, ty = positions[edge["source"]] + 218, positions[edge["target"]]
+        _edge(parts, source=edge["source"], target=edge["target"], kind="depends_on",
+              start=(770, sy), end=(770, ty), note=f"{edge['reason']} {edge['qualification']}")
+        _text(parts, 32, ty - 50, edge["reason"], "node-copy", width=88, limit=2)
+    if not graph["nodes"]:
+        _text(parts, 32, 130, "No experiments or observed final answer.", "section")
+    return "".join(parts), 150 + max(1, len(graph["nodes"])) * 310
+
+
+def to_actions_svg(episode: Episode) -> str:
+    body, height = _actions_parts(episode)
+    return _document(body, 900, height, "Actions as nodes and numerical reasoning as labelled edges; final best-observed selection.")
+
+
 def to_svg(episode: Episode) -> str:
+    actions, actions_height = _actions_parts(episode)
     evidence, evidence_height = _evidence_parts(episode)
     experiments, experiment_height = _experiment_parts(episode)
     gap = 26
     body = (
-        f'<g transform="translate({(EXPERIMENT_WIDTH - EVIDENCE_WIDTH) / 2},0)">{evidence}</g>'
-        f'<line class="divider" x1="32" y1="{evidence_height + gap / 2}" '
-        f'x2="{EXPERIMENT_WIDTH - 32}" y2="{evidence_height + gap / 2}"/>'
-        f'<g transform="translate(0,{evidence_height + gap})">{experiments}</g>'
+        f'<g>{actions}</g>'
+        f'<g transform="translate({(EXPERIMENT_WIDTH - EVIDENCE_WIDTH) / 2},{actions_height + gap})">{evidence}</g>'
+        f'<g transform="translate(0,{actions_height + evidence_height + 2 * gap})">{experiments}</g>'
     )
-    return _document(body, EXPERIMENT_WIDTH, evidence_height + gap + experiment_height,
-                     "Evidence graph followed by a linked chronological experiment graph.")
+    return _document(body, EXPERIMENT_WIDTH, actions_height + evidence_height + 2 * gap + experiment_height,
+                     "Actions and reasoning, evidence relationships, and detailed experiment chronology.")
 
 
 def _namespace_svg(svg: str, prefix: str) -> str:
@@ -558,19 +636,25 @@ document.addEventListener("DOMContentLoaded", () => {
 def html_body(episode: Episode, prefix: str = "episode") -> str:
     graph = episode.graph
     parts = [f'<article data-episode="{_esc(prefix)}">', '<dl class="graph-contract">',
-             f'<div><dt>Task</dt><dd>{_esc(episode.config.task)}</dd></div>',
-             f'<div><dt>Policy</dt><dd>{_esc(episode.config.policy)}</dd></div>',
-             f'<div><dt>Executed trials</dt><dd>{len(graph.observations)}</dd></div>',
+             f'<div><dt>Task</dt><dd>{_esc(episode.task.name)}</dd></div>',
+             f'<div><dt>Acquisition</dt><dd>{_esc(episode.config.acquisition)}</dd></div>',
+             f'<div><dt>Executed trials</dt><dd>{len(graph.observations)} / {episode.config.budget}</dd></div>',
              f'<div><dt>Source records</dt><dd>{len(graph.evidence_records)}</dd></div>',
              f'<div><dt>Claims</dt><dd>{len(graph.claims)}</dd></div></dl>']
-    for view, title, svg in (("evidence", "Claims, evidence and qualifications", to_evidence_svg(episode)),
+    result = episode.final_result()
+    if result:
+        parts += [f'<p class="a-prose"><strong>Final: {_esc(result["candidate_id"])} · '
+                  f'{result["value_shown"]:.6g} {_esc(result["outcome_unit"])}</strong><br>'
+                  f'{_esc(result["rule"])}<br>{_esc(result["uncertainty"])}</p>']
+    for view, title, svg in (("actions", "Actions and reasoning", to_actions_svg(episode)),
+                              ("evidence", "Claims, evidence and qualifications", to_evidence_svg(episode)),
                               ("experiments", "Experiments and reasoning", to_experiment_svg(episode))):
         heading_id = f"{prefix}-{view}-heading"
         parts.extend([
             f'<section class="a-section" aria-labelledby="{_esc(heading_id)}">',
             f'<h2 class="a-section__title" id="{_esc(heading_id)}">{title}</h2>',
             '<p class="a-section__note">Select a record to inspect its source or revision. '
-            'Matching IDs highlight across both views. Drag or use arrow keys to pan; +, − and 0 control zoom.</p>',
+            'Matching IDs highlight across views. Drag or use arrow keys to pan; +, − and 0 control zoom.</p>',
             f'<div class="a-diagram" data-a-diagram tabindex="0" aria-label="{title}">',
             '<div class="a-toolbar a-no-print">',
             '<button type="button" class="a-btn a-btn--outline" data-a-zoom="out">Zoom out</button>',
@@ -599,6 +683,7 @@ def to_markdown(episode: Episode) -> str:
         "## Dataset contract", episode.task.briefing(episode.config.budget),
         f"Provenance: {episode.task.provenance}",
         *[f"- {limitation}" for limitation in episode.task.limitations],
+        "## Greedy final answer", "```json", json.dumps(episode.final_result(), indent=2), "```",
         "## Experiment timeline",
     ]
     for step in episode.trajectory:

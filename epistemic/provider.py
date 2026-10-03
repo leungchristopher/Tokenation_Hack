@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import time
@@ -37,7 +36,7 @@ class Provider:
 
 @dataclass
 class MockProvider(Provider):
-    """Tests plumbing, not scientific reasoning. It can select any measured candidate."""
+    """A deterministic no-claim fixture for evidence integration tests."""
 
     name: str = "mock"
     model: str = "mock-deterministic"
@@ -48,17 +47,7 @@ class MockProvider(Provider):
     def complete(self, prompt: str) -> str:
         self.calls += 1
         self.tokens += len(prompt) // 4
-        if prompt.startswith("EVIDENCE_ONLY:"):
-            return json.dumps({"claim_updates": []})
-        digest = hashlib.sha256(f"{self.seed}:{prompt}".encode()).hexdigest()
-        pool = json.loads(prompt.rsplit("FULL_CANDIDATE_POOL=", 1)[1].splitlines()[0])
-        choice = pool[int(digest[:8], 16) % len(pool)]
-        return json.dumps({
-            "candidate_id": choice[0], "evidence": ["K1"], "targeted_uncertainty": "response",
-            "prediction": int(digest[8:12], 16) / 65535,
-            "rationale": f"Deterministic mock keyed on visible state digest {digest[:8]}.",
-            "implications": "Mock prediction has no scientific meaning; this run verifies plumbing only.",
-        })
+        return json.dumps({"claim_updates": []})
 
 
 @dataclass
@@ -98,7 +87,9 @@ class OpenAICompatibleProvider(Provider):
         return payload["choices"][0]["message"]["content"]
 
 
-def get_provider(spec: str = "mock", seed: int | None = 0, temperature: float = 0.0) -> Provider:
+def get_provider(spec: str = "none", seed: int | None = 0, temperature: float = 0.0) -> Provider:
+    if spec == "none":
+        return Provider(name="none", model="none")
     if spec == "mock":
         return MockProvider(seed=seed, temperature=temperature)
     if spec.startswith("openai:"):
@@ -112,4 +103,4 @@ def get_provider(spec: str = "mock", seed: int | None = 0, temperature: float = 
             model_revision=os.environ.get("EPISTEMIC_MODEL_REVISION", "unspecified"),
             inference_stack=os.environ.get("EPISTEMIC_INFERENCE_STACK", "unspecified OpenAI-compatible server"),
         )
-    raise KeyError(f"Unknown provider {spec!r}; use mock or openai:<model>.")
+    raise KeyError(f"Unknown provider {spec!r}; use none, mock or openai:<model>.")
