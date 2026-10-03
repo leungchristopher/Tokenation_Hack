@@ -121,6 +121,16 @@ class Session(BaseModel):
         pick = max if self.env.goal == "maximize" else min
         return pick(exps, key=lambda e: e.result).params if exps else None
 
+    def posterior(self) -> tuple[np.ndarray, np.ndarray]:
+        """GP posterior mean (in the result's units) and sd over every feasible condition."""
+        env, exps = self.env, self.graph.experiments
+        C = env.encode(env.X)
+        Xo = C[[env.index(e.params) for e in exps]]
+        kernel = ConstantKernel() * Matern(nu=2.5, length_scale=np.ones(C.shape[1])) + WhiteKernel()
+        gp = GaussianProcessRegressor(kernel, normalize_y=True, n_restarts_optimizer=2)
+        mu, sd = gp.fit(Xo, [e.result for e in exps]).predict(C, return_std=True)
+        return mu, sd
+
     def suggest(self, n: int = 1, xi: float = 0.01, avoid_closed: bool = True, beta: float = 10.0) -> list[dict]:
         """GP + expected improvement over all feasible, not-yet-run conditions.
 
@@ -145,9 +155,8 @@ class Session(BaseModel):
         Xo = C[run_idx]
         sign = 1.0 if env.goal == "maximize" else -1.0
         y = sign * np.array([e.result for e in exps])
-        kernel = ConstantKernel() * Matern(nu=2.5, length_scale=np.ones(C.shape[1])) + WhiteKernel()
-        gp = GaussianProcessRegressor(kernel, normalize_y=True, n_restarts_optimizer=2).fit(Xo, y)
-        mu, sd = gp.predict(C, return_std=True)
+        mu, sd = self.posterior()
+        mu = sign * mu
         z = (mu - y.max() - xi) / np.maximum(sd, 1e-9)
         ei = (mu - y.max() - xi) * norm.cdf(z) + sd * norm.pdf(z)
         acq = ei if pi is None else ei * pi ** (beta * prior.trust / len(exps))
