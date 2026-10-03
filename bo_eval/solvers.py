@@ -11,8 +11,8 @@ from bo_eval.amass import amass_search
 from bo_eval.core import Session, bo_loop, random_loop
 from bo_eval.dual import explore
 from bo_eval.state import BOState, use_session
-from bo_eval.tools.research import web_literature
 from bo_eval.tools import add_reasoning, bayes_opt_suggest, close_branch, run_experiment, submit, view_graph
+from bo_eval.tools.research import web_literature
 
 INSTRUCTIONS = """You are an autonomous experimentalist searching an experimental space for the optimal configuration.
 Every experiment is a node in a reasoning graph; link it to the node it follows from (its parent) with a concise,

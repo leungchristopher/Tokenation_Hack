@@ -14,6 +14,18 @@ class Node(BaseModel):
     closed: bool = False
     closed_reason: str | None = None
 
+    @property
+    def inputs(self) -> dict[str, float]:
+        if self.params is None:
+            raise ValueError("The root node has no experiment inputs.")
+        return self.params
+
+    @property
+    def value(self) -> float:
+        if self.result is None:
+            raise ValueError("The root node has no observation.")
+        return self.result
+
 
 class Prior(BaseModel):
     """LLM belief about where the optimum lies: param -> (best, width as a fraction of the range)."""
@@ -108,8 +120,8 @@ class ReasoningGraph(BaseModel):
             if n.params is None:
                 lines.append(f'  {n.id}(("start"))')
             else:
-                p = "<br/>".join(f"{q(k)}={v:g}" for k, v in n.params.items())
-                lines.append(f'  {n.id}["{n.id}<br/>{p}<br/><b>{n.result:.4g}</b>"]')
+                parameters = "<br/>".join(f"{q(k)}={v:g}" for k, v in n.params.items())
+                lines.append(f'  {n.id}["{n.id}<br/>{parameters}<br/><b>{n.result:.4g}</b>"]')
         lines += [
             f'  {e.source} {"-->" if e.kind == "experiment" else "-.->"}|"{q(e.reasoning)}"| {e.target}'
             for e in self.edges

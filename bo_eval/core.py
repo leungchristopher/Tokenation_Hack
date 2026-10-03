@@ -118,7 +118,7 @@ class Session(BaseModel):
     def best_observed(self) -> dict | None:
         exps = self.graph.experiments
         pick = max if self.env.goal == "maximize" else min
-        return pick(exps, key=lambda e: e.result).params if exps else None
+        return pick(exps, key=lambda e: e.value).inputs if exps else None
 
     def model(self, gated: bool = False, learn: bool = True) -> Posterior:
         priors = [
@@ -144,7 +144,7 @@ class Session(BaseModel):
         env, exps = self.env, self.graph.experiments
         C = env.encode(env.X)
         priors = self.graph.priors if gated else []
-        run_idx = [env.index(e.params) for e in exps]
+        run_idx = [env.index(e.inputs) for e in exps]
         mask = np.ones(len(C), bool)
         mask[run_idx] = False
         if avoid_closed and exps:
@@ -167,7 +167,7 @@ class Session(BaseModel):
         model = model or self.model(gated=gated, learn=learn)
         mu, sd = model.mean, model.sd
         pick = max if env.goal == "maximize" else min
-        best = pick(e.result for e in exps)
+        best = pick(e.value for e in exps)
         ei = expected_improvement(mu, sd, best, env.goal, xi)
         acq = ei
         return [
@@ -187,7 +187,7 @@ class Session(BaseModel):
             raise ValueError("score() requires a benchmark with known truth; live domains need an external scorer.")
         best = env.true_value(env.optimum)
         regret = 1.0 if answer is None else abs(best - env.true_value(env.index(answer))) / abs(best)
-        hits = [e.id for e in self.graph.experiments if env.index(e.params) == env.optimum]
+        hits = [e.id for e in self.graph.experiments if env.index(e.inputs) == env.optimum]
         return {"found_optimal": float(regret <= tolerance), "n_experiments": len(self.graph.experiments),
                 "regret": regret, "answer": answer, "first_experiment_at_optimum": hits[0] if hits else None}
 
@@ -197,16 +197,16 @@ def bo_loop(s: Session, n_init: int = 3) -> None:
     """No LLM: random initial design, then GP-EI until the budget is spent; submit the best observed."""
     init = np.random.default_rng(s.seed).choice(len(s.env.X), size=min(n_init, len(s.env.X)), replace=False)
     for k in range(s.budget):
-        sug = [{"params": s.env.condition(init[k])}] if k < len(init) else s.suggest(1)
+        sug: list[dict] = [{"params": s.env.condition(init[k])}] if k < len(init) else s.suggest(1)
         if not sug:
             break
-        s.run(sug[0]["params"], reasoning="initial design" if k < n_init else "BO suggestion")
-    if s.graph.experiments:
-        s.submit(s.best_observed(), reason="Best observed result.")
+        s.run(sug[0]["params"], reasoning="uniform initial design" if k < len(init) else sug[0]["reason"])
+    if (answer := s.best_observed()) is not None:
+        s.submit(answer, reason="Best observed result.")
 
 
 def random_loop(s: Session) -> None:
     for i in np.random.default_rng(s.seed).permutation(len(s.env.X))[: s.budget]:
         s.run(s.env.condition(i), reasoning="random")
-    if s.graph.experiments:
-        s.submit(s.best_observed(), reason="Best observed result.")
+    if (answer := s.best_observed()) is not None:
+        s.submit(answer, reason="Best observed result.")

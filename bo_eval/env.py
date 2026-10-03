@@ -1,8 +1,9 @@
 """Black-box experiment environments backed by measured data."""
 
+import sys
 from functools import cache, cached_property
 from pathlib import Path
-import sys
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -48,7 +49,7 @@ class TabularEnv(Domain):
 _ICFREE = "split-GFP fluorescence yield (relative to the no-DNA control) of {} in an Echo-assembled cell-free reaction"
 
 # name -> TabularEnv.from_csv kwargs. To add a task, drop a CSV in data/ and add a line here.
-ENVS = {
+ENVS: dict[str, dict[str, Any]] = {
     "upo_abts": dict(
         file="upo_abts.csv",
         description="the mean specific rate [U/mg] of unspecific peroxygenase (UPO) oxidising ABTS",

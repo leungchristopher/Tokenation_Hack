@@ -1,5 +1,5 @@
-import json
 import asyncio
+import json
 import sys
 
 import numpy as np
@@ -26,6 +26,7 @@ def test_live_domain_optimises_and_exports_without_inspect(tmp_path):
     assert len(session.graph.experiments) == 6
     assert session.submission == {"x": 3.0}
     assert session.graph.selected is not None
+    assert any("EI " in edge.reasoning for edge in session.graph.edges)
     paths = session.graph.export(tmp_path / "reasoning")
     assert {path.suffix for path in paths} == {".json", ".md", ".svg"}
     assert "Final selection" in paths[1].read_text()
@@ -100,3 +101,24 @@ def test_literature_guided_loop_uses_same_portable_core():
     assert len(session.graph.evidence) == len(session.graph.priors) == 1
     assert session.graph.selected
     assert set(gates) == {"P1"}
+    np.testing.assert_allclose(gates["P1"], session.model(gated=True).gates["P1"])
+
+
+def test_dual_handles_empty_budget_and_exhausted_candidate_set():
+    async def unused(prompt):
+        raise AssertionError("No model or search call expected.")
+
+    empty = Session(domain=quadratic_domain(), budget=0)
+    assert asyncio.run(explore(empty, unused, unused)) == {}
+
+    domain = Domain(
+        name="single",
+        description="one feasible condition",
+        params=["x"],
+        X=np.array([[3]]),
+        evaluate=lambda params, rng: 1.0,
+    )
+    session = Session(domain=domain, budget=3)
+    assert asyncio.run(explore(session, unused, unused, priors=False)) == {}
+    assert len(session.graph.experiments) == 1
+    assert session.submission == {"x": 3.0}

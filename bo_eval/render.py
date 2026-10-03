@@ -1,10 +1,10 @@
 """Dependency-free SVG view of the graph. Full explanations remain in tooltips and Markdown."""
 
-from html import escape
 import textwrap
+from html import escape
 from urllib.parse import urlparse
 
-from bo_eval.graph import ReasoningGraph
+from bo_eval.graph import Evidence, Prior, ReasoningGraph
 
 
 def _url(source: str) -> str:
@@ -15,7 +15,7 @@ def _url(source: str) -> str:
 
 def to_svg(graph: ReasoningGraph) -> str:
     experiments = graph.experiments
-    knowledge = [*graph.evidence, *graph.priors]
+    knowledge: list[Evidence | Prior] = [*graph.evidence, *graph.priors]
     height = max(260 + len(experiments) * 126, 240 + len(knowledge) * 180)
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="{height}" viewBox="0 0 1100 {height}" role="img">',
@@ -81,7 +81,7 @@ def to_svg(graph: ReasoningGraph) -> str:
             ("#f1f5f9", "#94a3b8") if n.closed else ("#fff", "#cbd5e1")
         )
         title = f"{n.id} · measured {n.result:.4g}" + (" · selected" if selected else " · not pursued" if n.closed else "")
-        subtitle = ", ".join(f"{p}={v:g}" for p, v in n.params.items())
+        subtitle = ", ".join(f"{p}={v:g}" for p, v in n.inputs.items())
         box(n.id, title, subtitle, detail, color, stroke)
     for v in graph.evidence:
         detail = f"{v.claim}\nTrust {v.trust:g}: {v.trust_reason}\nSources: {'; '.join(v.sources)}"

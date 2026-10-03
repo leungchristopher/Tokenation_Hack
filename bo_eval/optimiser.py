@@ -47,9 +47,9 @@ def fit_posterior(
         raise ValueError("A posterior needs at least one experiment.")
     priors = priors or []
     candidates = env.encode(env.X)
-    indices = [env.index(e.params) for e in experiments]
+    indices = [env.index(e.inputs) for e in experiments]
     sign = 1.0 if env.goal == "maximize" else -1.0
-    y = sign * np.array([e.result for e in experiments], dtype=float)
+    y = sign * np.array([e.value for e in experiments], dtype=float)
     offset, scale = y.mean(), y.std() or 1.0
     z = (y - offset) / scale
     basis = np.array([prior_weight(env, candidates, p.belief) for p in priors]).reshape(

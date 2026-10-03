@@ -17,8 +17,9 @@ import json
 import re
 from typing import Awaitable, Callable
 
-from bo_eval.core import Session
 import numpy as np
+
+from bo_eval.core import Session
 
 Ask = Callable[[str], Awaitable[str]]
 
@@ -78,27 +79,32 @@ async def hypothesise(s: Session, think: Ask, search: Ask, literature: bool = Tr
 async def explore(s: Session, think: Ask, search: Ask, refocus: float = 0.3, priors: bool = True, learn: bool = True,
                   literature: bool = True, challenge: bool = True) -> dict[str, float]:
     """Run the budget; return each prior's learned gate (on the trust scale). The flags switch parts off for ablation."""
+    if s.budget == 0:
+        return {}
     if priors:
         await hypothesise(s, think, search, literature, challenge)
     env, sign, gates, refocused = s.env, (1.0 if s.env.goal == "maximize" else -1.0), {}, set()
     while len(exps := s.graph.experiments) < s.budget:
-        priors, open_ = s.graph.priors, [e for e in exps if not e.closed]
+        prior_nodes, open_ = s.graph.priors, [e for e in exps if not e.closed]
         if len(exps) < 2:
-            suggestion = s.suggest(1, avoid_closed=False, gated=True, learn=learn)[0]
+            suggestions = s.suggest(1, avoid_closed=False, gated=True, learn=learn)
+            if not suggestions:
+                break
+            suggestion = suggestions[0]
             why = suggestion["reason"]
         else:
             model = s.model(gated=True, learn=learn)
             mu, sd = model.mean, model.sd
             g, gsd = list(model.gates.values()), list(model.gate_sd.values())
-            gates = {p.id: round(float(x), 2) for p, x in zip(priors, g)}
-            idx = {e.id: env.index(e.params) for e in exps}
+            gates = {p.id: round(float(x), 2) for p, x in zip(prior_nodes, g)}
+            idx = {e.id: env.index(e.inputs) for e in exps}
             inc = max(exps, key=lambda e: sign * mu[idx[e.id]])
             for e in open_:  # Hintikka closure: the optimistic bound cannot beat the incumbent
                 bound = mu[idx[e.id]] + sign * 2 * sd[idx[e.id]]
                 if e.id != inc.id and e.id in s.graph.open_leaves() and sign * bound < sign * mu[idx[inc.id]]:
-                    s.close(e.id, f"Not pursued under the current GP: bound {bound:.3g} is below "
+                    s.close(e.id, f"Not pursued under the current GP: bound {bound:.3g} is not better than "
                               f"{inc.id}'s prediction {mu[idx[inc.id]]:.3g}. This is a model judgement, not proof.")
-            for p, gp, gs in zip(priors, g, gsd):  # narrow spotlight: data disagrees with the literature
+            for p, gp, gs in zip(prior_nodes, g, gsd):  # narrow spotlight: data disagrees with the literature
                 if literature and p.id not in refocused and abs(gp - p.trust) > refocus and gs < refocus / 2 and s.searches < s.max_searches:
                     refocused.add(p.id)
                     ev = next((v for v in reversed(s.graph.evidence) if p.id in v.about), None)
@@ -117,17 +123,20 @@ async def explore(s: Session, think: Ask, search: Ask, refocus: float = 0.3, pri
             why = suggestion["reason"] + "".join(f"; gate {k}={v:g}" for k, v in gates.items())
         params = suggestion["params"]
         open_ = [e for e in s.graph.experiments if not e.closed]
-        C = env.encode(np.array([list(params.values())] + [list(e.params.values()) for e in open_]))
+        C = env.encode(np.array([list(params.values())] + [list(e.inputs.values()) for e in open_]))
         parent = open_[int(((C[1:] - C[0]) ** 2).sum(1).argmin())].id if open_ else "root"
         s.run(params, parent, why)
-    mu = s.model(gated=True, learn=learn).mean
-    chosen = max(s.graph.experiments, key=lambda e: sign * mu[env.index(e.params)])
-    chosen_mean = mu[env.index(chosen.params)]
+    if not s.graph.experiments:
+        return {}
+    final_model = s.model(gated=True, learn=learn)
+    mu, gates = final_model.mean, final_model.gates
+    chosen = max(s.graph.experiments, key=lambda e: sign * mu[env.index(e.inputs)])
+    chosen_mean = mu[env.index(chosen.inputs)]
     for node_id in s.graph.open_leaves():
         if node_id != chosen.id:
             node = s.graph.nodes[node_id]
-            prediction = mu[env.index(node.params)]
+            prediction = mu[env.index(node.inputs)]
             s.close(node_id, f"Budget ended; posterior mean {prediction:.4g} was not preferred to "
                     f"{chosen.id} at {chosen_mean:.4g}.")
-    s.submit(chosen.params, reason=f"Best posterior mean among tested conditions ({chosen_mean:.4g}).")
+    s.submit(chosen.inputs, reason=f"Best posterior mean among tested conditions ({chosen_mean:.4g}).")
     return gates
