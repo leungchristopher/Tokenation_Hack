@@ -1,8 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "bo-eval"
 version = "0.1.0"
+description = "Portable Bayesian optimisation with cited, auditable reasoning graphs"
+readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["inspect_ai", "numpy", "pandas", "scipy", "scikit-learn"]
+dependencies = ["numpy", "pandas", "pydantic>=2", "scipy", "scikit-learn"]
+
+[project.optional-dependencies]
+inspect = ["inspect_ai", "httpx"]
+literature = ["httpx"]
+dev = ["pytest", "ruff", "mypy", "build"]
 
 [tool.setuptools]
 packages = ["bo_eval", "bo_eval.tools"]
+
+[tool.setuptools.data-files]
+"share/bo-eval/data" = ["data/upo_abts.csv"]
+"share/bo-eval/data/icfree" = ["data/icfree/cole1_pro.csv", "data/icfree/colm_pro.csv", "data/icfree/colm_eu.csv"]
+"share/bo-eval/data/zimmer" = ["data/zimmer/a549_taxol_cis_dox.csv"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+ignore_missing_imports = true

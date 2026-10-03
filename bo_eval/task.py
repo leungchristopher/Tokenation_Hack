@@ -9,7 +9,7 @@ from bo_eval.solvers import SOLVERS, init_bo
 @task
 def bo_eval(
     env: str = "upo_abts",
-    solver: str = "react",
+    solver: str = "dual",
     budget: int = 30,
     seed: int = 0,
     tolerance: float = 0.0,

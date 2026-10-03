@@ -1,9 +1,9 @@
 import json
-from pathlib import Path
 
 from inspect_ai.scorer import Score, Target, mean, scorer, stderr
 from inspect_ai.solver import TaskState
 
+from bo_eval.env import TabularEnv
 from bo_eval.state import session
 
 METRICS = {k: [mean(), stderr()] for k in ("found_optimal", "n_experiments", "regret")}
@@ -18,11 +18,9 @@ def bo_scorer(tolerance: float = 0.0, graph_dir: str | None = "logs/graphs"):
         r, g = s.score(tolerance), s.graph
         mermaid = g.to_mermaid()
         if graph_dir:
-            out = Path(graph_dir) / f"{state.sample_id}_epoch{state.epoch}"
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.with_suffix(".md").write_text(f"```mermaid\n{mermaid}\n```\n\n```\n{g.to_text()}\n```\n")
-            out.with_suffix(".json").write_text(g.model_dump_json(indent=2))
+            g.export(f"{graph_dir}/{state.sample_id}_epoch{state.epoch}")
         env = s.env
+        assert isinstance(env, TabularEnv)
         return Score(
             value={k: r[k] for k in METRICS},
             answer=json.dumps(r["answer"]),
