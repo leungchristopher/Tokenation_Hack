@@ -1,16 +1,12 @@
 """Solver registry. Add new architectures to SOLVERS (or pass any solver via `inspect eval --solver`)."""
 
-import numpy as np
 from inspect_ai.agent import AgentSubmit, as_solver, react
 from inspect_ai.solver import Generate, TaskState, solver
 from inspect_ai.util import store_as
 
-from bo_eval.env import get_env
-from bo_eval.state import BOState
+from bo_eval.core import Session, bo_loop, random_loop
+from bo_eval.state import BOState, use_session
 from bo_eval.tools import add_reasoning, bayes_opt_suggest, close_branch, researcher, run_experiment, set_prior, submit, view_graph
-from bo_eval.tools.bayes_opt import suggest
-from bo_eval.tools.experiment import run
-from bo_eval.tools.submit import submit_params
 
 INSTRUCTIONS = """You are an autonomous experimentalist searching an experimental space for the optimal configuration.
 Every experiment is a node in a reasoning graph; link it to the node it follows from (its parent) with a short
@@ -34,9 +30,8 @@ again when a result surprises you or before closing a branch, and cite the evide
 @solver
 def init_bo(budget: int, seed: int = 0, max_searches: int = 6):
     async def solve(state: TaskState, generate: Generate) -> TaskState:
-        s = store_as(BOState)
-        s.env, s.budget, s.seed = state.metadata["env"], budget, seed * 1000 + state.epoch
-        s.max_searches = max_searches
+        store_as(BOState).session = Session(env_name=state.metadata["env"], budget=budget,
+                                            seed=seed * 1000 + state.epoch, max_searches=max_searches)
         return state
 
     return solve
@@ -58,18 +53,8 @@ def llm_agent(bo: bool = True, graph: bool = True, prior: bool = False, research
 
 @solver
 def bo_baseline(n_init: int = 3):
-    """No LLM: random initial design, then GP-EI until the budget is spent; submit the best observed."""
-
     async def solve(state: TaskState, generate: Generate) -> TaskState:
-        s = store_as(BOState)
-        env = get_env(s.env)
-        init = np.random.default_rng(s.seed).choice(len(env.df), size=n_init, replace=False)
-        for k in range(s.budget):
-            sug = [{"params": env.condition(init[k])}] if k < n_init else suggest(1)
-            if not sug:
-                break
-            run(sug[0]["params"], reasoning="initial design" if k < n_init else "BO suggestion")
-        _submit_best()
+        use_session(lambda s: bo_loop(s, n_init))
         return state
 
     return solve
@@ -78,23 +63,10 @@ def bo_baseline(n_init: int = 3):
 @solver
 def random_baseline():
     async def solve(state: TaskState, generate: Generate) -> TaskState:
-        s = store_as(BOState)
-        env = get_env(s.env)
-        rng = np.random.default_rng(s.seed)
-        for i in rng.permutation(len(env.df))[: s.budget]:
-            run(env.condition(i), reasoning="random")
-        _submit_best()
+        use_session(random_loop)
         return state
 
     return solve
-
-
-def _submit_best():
-    s = store_as(BOState)
-    exps = s.graph.experiments
-    if exps:
-        pick = max if get_env(s.env).goal == "maximize" else min
-        submit_params(pick(exps, key=lambda e: e.result).params)
 
 
 SOLVERS = {

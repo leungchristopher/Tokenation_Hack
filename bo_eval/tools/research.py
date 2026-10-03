@@ -2,11 +2,9 @@
 
 from inspect_ai.agent import as_tool, react
 from inspect_ai.model import GenerateConfig, get_model
-from inspect_ai.tool import ToolError, tool, web_search
-from inspect_ai.util import store_as
+from inspect_ai.tool import tool, web_search
 
-from bo_eval.env import get_env
-from bo_eval.state import BOState, Evidence, Prior
+from bo_eval.state import use_session
 
 RESEARCH = """You are a research agent supporting an experimentalist who is optimising a black-box system.
 Search the literature with literature_search and record what you find with cite_evidence. Every claim needs sources
@@ -27,10 +25,7 @@ def literature_search():
         Args:
             query: What to look for, e.g. "taxol doxorubicin antagonism A549 combination index".
         """
-        s = store_as(BOState)
-        if s.searches >= s.max_searches:
-            raise ToolError(f"Search budget ({s.max_searches}) used up; record evidence from what you have.")
-        s.searches += 1
+        use_session(lambda s: s.charge_search())
         # Isolated generate: provider-side search blocks never mix with client tool calls in one history.
         out = await get_model().generate(
             "Search the scientific literature for: " + query + "\nReport each relevant finding with its system "
@@ -65,26 +60,9 @@ def cite_evidence():
             belief: Optional map of parameter -> [best_value, width as a fraction of the range] implied by the
                 evidence. Becomes the prior used by bayes_opt_suggest, weighted by trust.
         """
-        if not sources or not 0 <= trust <= 1:
-            raise ToolError("Give at least one source and a trust in [0, 1].")
-        s = store_as(BOState)
-        g, env = s.graph, get_env(s.env)
-        v = Evidence(id=f"R{len(g.evidence) + 1}", claim=claim, sources=sources, trust=trust,
-                     trust_reason=trust_reason, about=about or [])
-        g.evidence.append(v)
-        msg = f"Recorded {v.id}."
-        if belief:
-            bad = set(belief) - set(env.params)
-            if bad or any(len(b) != 2 or b[1] <= 0 for b in belief.values()):
-                raise ToolError(f"belief must map parameters in {env.params} to [best, width>0]; got {belief}")
-            after = g.experiments[-1].id if g.experiments else "root"
-            p = Prior(id=f"P{len(g.priors) + 1}", after=after, belief={k: tuple(b) for k, b in belief.items()},
-                      reasoning=f"from {v.id}: {claim}", trust=trust)
-            g.priors.append(p)
-            v.about.append(p.id)
-            msg += f" Prior {p.id} (trust {trust:g}) now weights bayes_opt_suggest."
-        s.graph = g
-        return msg
+        v = use_session(lambda s: s.cite(claim, sources, trust, trust_reason, about, belief))
+        prior = [a for a in v.about if a.startswith("P")]
+        return f"Recorded {v.id}." + (f" Prior {prior[-1]} (trust {trust:g}) now weights bayes_opt_suggest." if belief else "")
 
     return execute
 
