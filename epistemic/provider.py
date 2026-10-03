@@ -48,6 +48,8 @@ class MockProvider(Provider):
     def complete(self, prompt: str) -> str:
         self.calls += 1
         self.tokens += len(prompt) // 4
+        if prompt.startswith("EVIDENCE_ONLY:"):
+            return json.dumps({"claim_updates": []})
         digest = hashlib.sha256(f"{self.seed}:{prompt}".encode()).hexdigest()
         pool = json.loads(prompt.rsplit("FULL_CANDIDATE_POOL=", 1)[1].splitlines()[0])
         choice = pool[int(digest[:8], 16) % len(pool)]

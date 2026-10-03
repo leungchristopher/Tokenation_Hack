@@ -111,8 +111,9 @@ class TaskSpec:
 class Evaluator:
     """Holds hidden truth. Agents never receive unqueried labels."""
 
-    def __init__(self, task: TaskSpec, outcomes: pd.DataFrame) -> None:
+    def __init__(self, task: TaskSpec, outcomes: pd.DataFrame, provenance: str | None = None) -> None:
         self._task = task
+        self.provenance = provenance or task.provenance
         if outcomes["candidate_id"].tolist() != task.ids():
             raise ValueError("Evaluator outcomes must match the public candidate IDs.")
         self._outcomes = outcomes.set_index("candidate_id")
@@ -210,8 +211,7 @@ def load_drug() -> tuple[TaskSpec, Evaluator]:
         objective="percentage of surviving cells",
         direction="minimize",
         outcome_unit="% survival",
-        provenance="Zimmer et al., PNAS 2016 (doi:10.1073/pnas.1606301113), via the S2 archive of Tendler et al., "
-                   "PLoS Comput Biol 2019 (doi:10.1371/journal.pcbi.1006956.s002); converted by data/zimmer/convert.py.",
+        provenance="benchmark:drug-response; source attribution is withheld from the agent for evaluation.",
         limitations=(
             "The table holds one value per combination with no replicates, so there is no empirical noise estimate.",
             "Single-agent and vehicle controls are not included here, so no synergy objective is defined and "
@@ -226,7 +226,11 @@ def load_drug() -> tuple[TaskSpec, Evaluator]:
         ),
         execution_constraints="Doses are clipped to the measured 0.0137-20 uM range and snapped to the nearest measured combination.",
     )
-    return task, Evaluator(task, outcomes)
+    return task, Evaluator(
+        task, outcomes,
+        provenance="Zimmer et al., PNAS 2016 (doi:10.1073/pnas.1606301113), via the S2 archive of Tendler et al., "
+                   "PLoS Comput Biol 2019 (doi:10.1371/journal.pcbi.1006956.s002); converted by data/zimmer/convert.py.",
+    )
 
 
 TASKS = {"enzyme": load_enzyme, "drug": load_drug}

@@ -37,6 +37,8 @@ def episode_metrics(episode: Episode) -> dict:
         "interval_coverage_vs_truth": float(np.mean(covered)) if covered else None,
         "invalid_llm_selections": invalid,
         "invalid_llm_attempts": sum(len(s["llm"]["failures"]) for s in episode.trajectory),
+        "rejected_evidence_outputs": sum(
+            1 for s in episode.trajectory if s["llm"].get("evidence_valid") is False),
         "best_true_objective_curve": [
             (max if task.direction == "maximize" else min)(truths[:i + 1]) for i in range(len(truths))],
         "contradictions": len(episode.graph.contradictions()),

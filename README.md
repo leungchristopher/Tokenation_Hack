@@ -6,18 +6,25 @@ A minimal two-task benchmark, not a general agent framework:
 observe → update one GP → update the evidence graph → select → execute → append the audit
 ```
 
-Three policies share that loop: `random`, ordinary `bo` (Matérn GP + expected improvement), and
-`llm` (structured decisions using the same numerical summaries and evidence state). Literature
-does not modify the numerical GP here. Earlier gated, ReAct and tool-layer implementations remain
-in historical branches/PRs, not as competing active paths. There are no subagents, persistent claim
-ledger, branch-closing proofs or paid deployment.
+The default `bo_evidence` policy lets GP-BO select every experiment. A small LLM companion may
+request targeted literature or add scoped interpretations; it cannot change acquisition, forecasts,
+or final selection. Evidence errors are logged and never stop the optimiser. It makes at most three
+model calls, triggered by initial retrieval, available sources, the first three observations, or a
+predictive discrepancy.
+There is no full candidate pool in its prompt and no JSON experiment decision to reject.
+
+`bo` is the same numerical selector without model calls; `random` is the sanity baseline. The direct
+`llm` selector remains an explicit experimental comparator, not the default. Literature does not
+modify the numerical GP here; no optimisation benefit from these annotations is claimed. Earlier
+gated and ReAct implementations remain in historical branches/PRs. There are no subagents,
+persistent claim ledger, branch-closing proofs or paid deployment.
 
 ## Start without Inspect or credentials
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/python -m epistemic run --task enzyme --policy llm --provider mock \
+.venv/bin/python -m epistemic run --task enzyme --policy bo_evidence --provider mock \
   --budget 8 --seed 0 --out logs/enzyme-demo
 .venv/bin/python -m epistemic run --task drug --policy bo \
   --budget 8 --seed 0 --out logs/drug-demo
@@ -25,19 +32,23 @@ python3 -m venv .venv
 
 Use a fresh output directory: trajectories cannot be overwritten. Each run exports:
 
-- `graph.svg`: standalone objective curve, decisions, evidence, contradictions and revisions;
-  hover records for uncertainty, scope, alternatives and delivery reports;
+- `graph.html`: self-contained interactive evidence and experiment views; select a record for
+  full source metadata, uncertainty snapshots and revisions, with matching IDs highlighted across views;
+- `evidence.svg` and `experiments.svg`: separate printable graph views;
+- `graph.svg`: both views in one SVG, with typed links and qualitative uncertainty badges;
 - `audit.md` and `graph.json`: complete human-readable and typed evidence graphs;
 - `trajectory.jsonl`: agent state, exact prompt, action, pre-experiment numerical prediction,
   accessible observation and state revision;
 - `hidden_truth.jsonl`: **evaluator-only** realised settings, true outcomes and simulation metadata;
+- `hidden_provenance.json`: **evaluator-only** dataset attribution withheld from the agent;
 - `metrics.json`: evaluator-only objective/regret curves, error, coverage and cost;
 - `config.json`: settings and provider/model/decode metadata.
 
 Events are appended in memory then written once with exclusive creation; this is not a
 crash-recoverable live event store. The mock deterministically hashes the visible prompt and
 can choose any measured candidate. It is **plumbing only**, not scientific reasoning; its token
-counts are character-based estimates.
+counts are character-based estimates. In `bo_evidence` it returns no scientific claims; GP-BO still
+selects every condition.
 
 The direct API uses the same engine:
 
@@ -61,6 +72,14 @@ The existing drug adapter labels the assay as 48-hour A549 survival. The source 
 `data/zimmer/convert.py`. This work verifies the local table, not every upstream protocol or
 raw archive conversion. There is **no synergy objective**: this table does not supply the necessary
 single-agent/vehicle controls or a reference definition.
+
+The source paper **“Prediction of multidimensional drug dose responses based on measurements of
+drug pairs”** is held out from agent evidence. Its title, DOI (`10.1073/pnas.1606301113`), PubMed ID
+(`27562164`) and PMC ID (`PMC5027409`) are blocked in retrieval, raw tool results, fixed/frozen source
+bundles and model-added evidence. Agent-facing task provenance omits both the source citation and
+the archive citation; exact attribution is kept in the evaluator-only export. The human-readable
+attribution above is not sent to the model. This prevents retrieval leakage, not knowledge already
+present in a model's training.
 
 Enzyme salt, cosubstrate, solvent and temperature units are not established by this CSV.
 Four repeated parameter conditions have differing summary outcomes. As in the original adapter,
@@ -91,17 +110,28 @@ The four uncertainties remain separate:
 4. **Evidence:** source, scope, supporting/contradicting IDs, qualitative status, transfer
    assumptions and discriminating observable result. No arbitrary certainty probability.
 
-Only `observation`, `claim`, `assumption`, `decision` records and
-`supports`, `contradicts`, `depends_on`, `tests` edges exist. Observations and nested tool metadata
-are immutable through the API. References are checked. Revisions preserve prior statements,
-scope, criteria and evidence; dependencies are not causal attribution.
+Records are `evidence`, `uncertainty`, `observation`, `claim`, `assumption` and `decision`.
+Raw evidence title, abstract, reference, query and nested metadata are immutable; claims are
+separate, concise propositions. Immutable uncertainty snapshots distinguish source, transfer,
+mechanistic, response, model and execution limitations without invented certainty probabilities.
+Claim badges group response/model uncertainty and explicitly label unassessed categories.
 
-The LLM receives recent observations, up to eight active claims, assumptions and the **full**
-feasible pool. Numerical suggestions are not its only choices. It may repeat a setting (using
-budget), cite existing records and add/refine at most two scoped model conjectures per decision.
-Interpretations never become measured facts. Invalid JSON, unknown references, non-finite
-predictions and unknown candidates receive at most two retries; then the episode stops with
-a logged rejection—**no silent BO replacement**.
+Edges are `supports`, `qualifies`, `contradicts`, `not_transferable`, `depends_on` and `tests`,
+with distinct labels and line styles. `tests` is reserved for decision → observation links.
+References and globally unique IDs are checked. Revisions preserve statements, scope, criteria,
+evidence and uncertainty IDs. Dependencies are declared inputs, not causal attribution.
+The experiment view separates the intended experiment from its accessible observation and
+shows dated claim updates; execution cards are display projections, not fabricated graph records.
+
+The evidence companion receives recent observations, up to eight active claims, assumptions, model
+diagnostics and the next GP-selected experiment. It may add/refine at most two scoped model
+conjectures per call. Interpretations never become measurements. Unknown citations, attempts to
+rewrite protected records, malformed output and provider failures are logged and ignored without
+losing an experiment. The graph does not pretend these annotations caused GP choices.
+
+The optional direct `llm` comparator receives the full feasible pool and may choose outside numerical
+suggestions. Its invalid actions receive at most two retries, then stop with a logged rejection;
+there is no silent BO replacement in that comparator.
 
 LLM point forecasts are labelled self-reported, not statistical response uncertainty. Numerical
 pre-experiment means/intervals are computed independently by the GP and saved separately.
@@ -184,9 +214,13 @@ The existing Amass backend is retained without bibliometric “trust probabiliti
   --evidence-file logs/source-bundle/evidence.json --out logs/evidence-demo
 ```
 
-Alternatively provide a curated JSON list of `Claim` records with attributable sources.
-Retraction/bibliographic metadata are retained; applicability still needs review. The default
-fixed bundle records dataset provenance/limitations, not invented mechanistic findings.
+`records_to_claims()` returns a graph-shaped bundle containing immutable source records,
+concise propositions, explicit scope, source/transfer/mechanistic uncertainty, discriminating
+experiments and typed links. Full abstracts appear only in source metadata and hover/inspector
+details, not claim labels or the compact model context. Retraction/bibliographic metadata are
+retained; applicability still needs review. Legacy curated claim lists remain readable; attach
+raw records when available. Import remaps IDs safely and deduplicates attributable references.
+The default fixed bundle records dataset provenance/limitations, not invented mechanistic findings.
 
 Live retrieval is optional: pass `--max-searches 2` to `run`, or `-T max_searches=2` to Inspect.
 An LLM decision may request one focused `search_query`; at most three records are returned per
@@ -205,8 +239,21 @@ inspect eval epistemic/inspect_task.py --model mockllm/model \
   -T task_name=drug -T policy=bo -T budget=3
 ```
 
-`provider=inspect` uses Inspect's configured model for LLM calls; `provider=mock` uses the core
-mock. Loop, execution, graph and scoring are shared. Normal core imports do not require Inspect.
+`provider=inspect` uses Inspect's configured model; `provider=mock` uses the core mock. The
+default is `policy=bo_evidence`, with the same GP/EI selector as `policy=bo`. For a capped real-model
+smoke test, after approval and with credentials supplied through the environment:
+
+```bash
+inspect eval epistemic/inspect_task.py --model anthropic/claude-sonnet-4-6 \
+  -T task_name=enzyme -T budget=8 -T max_searches=2 \
+  --max-tokens 1000 --token-limit 50000 --time-limit 300 --max-retries 1 --retry-on-error 0
+inspect eval epistemic/inspect_task.py --model anthropic/claude-sonnet-4-6 \
+  -T task_name=drug -T budget=8 -T max_searches=2 \
+  --max-tokens 1000 --token-limit 50000 --time-limit 300 --max-retries 1 --retry-on-error 0
+```
+
+Each task can use at most three evidence calls and two searches while the optimiser executes eight
+experiments. Loop, execution, graph and scoring are shared. Normal core imports do not require Inspect.
 
 ## Checks and portability
 

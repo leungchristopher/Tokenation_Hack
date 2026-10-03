@@ -12,11 +12,12 @@ from typing import Any
 
 import numpy as np
 
-from epistemic.evidence import seed_graph
+from epistemic.evidence import ingest_literature, seed_graph
 from epistemic.execution import execution_model
-from epistemic.graph import Claim, Decision, EvidenceGraph, Observation
+from epistemic.graph import Claim, Decision, EvidenceGraph, Observation, UncertaintyKind, UncertaintyRecord
 from epistemic.policies import POLICIES, Proposal, SelectionError
 from epistemic.provider import Provider, get_provider
+from epistemic.source_filter import accessible_result, excluded_source
 from epistemic.surrogate import Surrogate
 from epistemic.tasks import Evaluator, TaskSpec, load_task
 from epistemic.update import update_state
@@ -62,6 +63,7 @@ class Episode:
     trajectory: list[dict] = field(default_factory=list)
     hidden: list[dict] = field(default_factory=list)
     provider_metadata: dict[str, Any] = field(default_factory=dict)
+    evaluator_provenance: str = ""
 
     @property
     def decisions(self) -> list[Decision]:
@@ -92,6 +94,7 @@ class Episode:
                 handle.write(json.dumps(step) + "\n")
         (out / "graph.json").write_text(self.graph.model_dump_json(indent=2))
         (out / "config.json").write_text(json.dumps({**asdict(self.config), "provider": self.provider_metadata}, indent=2))
+        (out / "hidden_provenance.json").write_text(json.dumps({"source": self.evaluator_provenance}, indent=2))
         return out
 
 
@@ -111,7 +114,7 @@ def run_episode(config: Config, provider: Provider | None = None,
                                      with_model_advice=config.with_model_advice, budget=config.budget,
                                      max_searches=config.max_searches)
     graph = seed_graph(task, misleading=config.misleading_evidence, evidence_file=config.evidence_file)
-    episode = Episode(config, task, graph, provider_metadata=provider.metadata())
+    episode = Episode(config, task, graph, provider_metadata=provider.metadata(), evaluator_provenance=evaluator.provenance)
     executor = execution_model(task, config.execution)
     surrogate = Surrogate(task, seed=config.seed).fit([])
     rng = np.random.default_rng(np.random.SeedSequence([config.seed, 0]))
@@ -139,16 +142,33 @@ def run_episode(config: Config, provider: Provider | None = None,
             claim_id = update.claim_id or f"H{round}_{index}"
             if update.claim_id:
                 graph.revise(claim_id, round, update.status, "LLM interpretation of accessible evidence",
-                             update.evidence + update.contradicting_evidence, update.statement,
+                             update.evidence + update.contradicting_evidence + update.qualifying_evidence
+                             + update.non_transferable_evidence, update.statement,
                              update.scope, update.discriminating_result)
             else:
+                uncertainty_ids = []
+                categories: tuple[UncertaintyKind, ...] = ("source", "transfer", "mechanistic")
+                for category in categories:
+                    item = graph.add_uncertainty(UncertaintyRecord(
+                        id=f"U_{claim_id}_{category}", category=category,
+                        statement=f"{category.capitalize()} uncertainty has not been resolved by this interpretation.",
+                        scope=update.scope, evidence=tuple(update.evidence), round=round,
+                    ))
+                    uncertainty_ids.append(item.id)
                 graph.add_claim(Claim(id=claim_id, statement=update.statement, scope=update.scope,
                                       source="model_conjecture", evidence=update.evidence,
-                                      status=update.status, discriminating_result=update.discriminating_result), round=round)
+                                      status=update.status, uncertainties=uncertainty_ids,
+                                      discriminating_result=update.discriminating_result), round=round)
+                for uncertainty_id in uncertainty_ids:
+                    graph.link(uncertainty_id, claim_id, "qualifies")
             for ref in update.evidence:
                 graph.link(ref, claim_id, "supports", "LLM interpretation; not a measured fact")
             for ref in update.contradicting_evidence:
                 graph.link(ref, claim_id, "contradicts", "LLM interpretation; not causal attribution")
+            for ref in update.qualifying_evidence:
+                graph.link(ref, claim_id, "qualifies", "Interpretation narrows, but does not refute, the claim.")
+            for ref in update.non_transferable_evidence:
+                graph.link(ref, claim_id, "not_transferable", "Interpretation rejects the proposed context transfer.")
         decision = graph.add_decision(Decision(
             id=f"D{round}", round=round, candidate_id=proposal.candidate_id,
             claims=[e for e in proposal.evidence if e in graph.claims],
@@ -211,39 +231,18 @@ def run_episode(config: Config, provider: Provider | None = None,
                 policy.searches_remaining = config.max_searches - searches
                 start = time.perf_counter()
                 try:
+                    if excluded_source(proposal.search_query):
+                        raise ValueError("This source is excluded from evaluation evidence.")
                     if literature_search is None:
                         from epistemic.amass import records_to_claims, search_result
                         result = asyncio.run(search_result(proposal.search_query, limit=3))
-                        claims = records_to_claims(result["records"])
+                        bundle = records_to_claims(result["records"], query=proposal.search_query)
                     else:
-                        result = literature_search(proposal.search_query)
-                        claims = result["claims"]
-                    retrieved = [Claim.model_validate(payload) for payload in claims[:3]]
-                    for index, claim in enumerate(retrieved):
-                        if claim.source != "literature" or claim.benchmark_generated:
-                            raise ValueError("Retrieval must return attributable literature, not model conjectures.")
-                        claim.id = f"L{round}_{searches}_{index + 1}"
-                        graph._require(*claim.evidence)
-                        if claim.id in graph:
-                            raise ValueError("Retrieved source ID already exists.")
-                    known_sources = {
-                        claim.reference: claim.id
-                        for claim in graph.claims.values()
-                        if claim.source == "literature" and claim.reference
-                    }
-                    added = []
-                    duplicates = []
-                    for claim in retrieved:
-                        if claim.reference and claim.reference in known_sources:
-                            duplicates.append({
-                                "reference": claim.reference,
-                                "existing_claim_id": known_sources[claim.reference],
-                            })
-                            continue
-                        graph.add_claim(claim, round=round)
-                        if claim.reference:
-                            known_sources[claim.reference] = claim.id
-                        added.append(claim.model_dump())
+                        result = accessible_result(literature_search(proposal.search_query))
+                        bundle = result
+                    added, duplicates = ingest_literature(
+                        graph, bundle, round=round, prefix=f"{round}_{searches}", query=proposal.search_query, limit=3,
+                    )
                     retrieval.update(
                         status="success",
                         claims=added,
@@ -276,7 +275,7 @@ def run_episode(config: Config, provider: Provider | None = None,
                 "model_uncertainty": asdict(surrogate.model_uncertainty()),
             },
             "llm": {"valid_output": proposal.valid_llm_output, "attempts": proposal.attempts,
-                    "failures": proposal.failures},
+                    "failures": proposal.failures, "evidence_valid": proposal.evidence_valid},
         })
         episode.hidden.append({
             "round": round, "intended_id": record.intended_id, "realised_id": record.realised_id,

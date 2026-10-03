@@ -20,7 +20,7 @@ from epistemic.tasks import load_task
 
 @task
 def experimental_design(
-    task_name: str = "drug", policy: str = "llm", budget: int = 8, seed: int = 0,
+    task_name: str = "drug", policy: str = "bo_evidence", budget: int = 8, seed: int = 0,
     provider: str = "inspect", execution: str = "perfect", feedback: str = "true",
     flat: bool = False, misleading: bool = False, graph_dir: str = "logs/inspect-graphs",
     max_searches: int = 0, evidence_file: str | None = None,
@@ -34,7 +34,7 @@ def experimental_design(
     def sequential_episode():
         async def solve(state: TaskState, generate: Generate) -> TaskState:
             settings = Config(**(vars(config) | {"seed": seed + state.epoch - 1}))
-            if provider == "inspect" and policy == "llm":
+            if provider == "inspect" and policy in ("llm", "bo_evidence"):
                 model = get_model()
                 loop = asyncio.get_running_loop()
                 generation = model._resolve_config(GenerateConfig(

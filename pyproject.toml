@@ -19,6 +19,9 @@ dev = ["pytest", "ruff", "mypy", "build", "httpx"]
 [tool.setuptools]
 packages = ["epistemic"]
 
+[tool.setuptools.package-data]
+epistemic = ["viewer.html"]
+
 [tool.setuptools.data-files]
 "share/bo-eval/data" = ["data/upo_abts.csv"]
 "share/bo-eval/data/zimmer" = ["data/zimmer/a549_taxol_cis_dox.csv"]

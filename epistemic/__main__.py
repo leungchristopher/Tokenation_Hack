@@ -7,6 +7,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
+from epistemic.evidence import external_evidence
 from epistemic.interventions import closed_loop, graph_value, paired_interventions
 from epistemic.loop import Config, run_episode
 from epistemic.provider import get_provider
@@ -18,7 +19,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("run", "feedback", "closed-loop", "graph-control", "dataset-info", "literature"))
     parser.add_argument("--task", choices=("enzyme", "drug"), default="drug")
-    parser.add_argument("--policy", choices=("random", "bo", "llm"), default="llm")
+    parser.add_argument("--policy", choices=("random", "bo", "bo_evidence", "llm"), default="bo_evidence")
     parser.add_argument("--provider", default="mock", help="mock or openai:<model>")
     parser.add_argument("--budget", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
@@ -72,7 +73,7 @@ def main() -> None:
         results = {}
         base = run_episode(replace(config, feedback="true"), stop_after=args.prefix)
         frozen = list(base.graph.observations.values())
-        frozen_evidence = [c for c in base.graph.claims.values() if c.source == "literature"]
+        frozen_evidence = external_evidence(base.graph)
         for mode in ("total", "direct"):
             if args.mode not in ("both", mode):
                 continue

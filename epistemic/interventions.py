@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from epistemic.evidence import seed_graph
+from epistemic.evidence import external_evidence, ingest_literature, seed_graph
 from epistemic.graph import Claim, EvidenceGraph, Observation
 from epistemic.loop import Config, run_episode
 from epistemic.metrics import episode_metrics, recovery_round
@@ -54,14 +54,13 @@ def intervene(observations: list[Observation], task: TaskSpec, arm: str,
 def rebuild(task: TaskSpec, observations: list[Observation], seed: int,
             misleading: bool = False, model_advice: bool = True,
             evidence_file: str | None = None,
-            frozen_evidence: list[Claim] | None = None) -> tuple[EvidenceGraph, Surrogate, list[tuple[str, float]]]:
+            frozen_evidence: dict | list[Claim] | None = None) -> tuple[EvidenceGraph, Surrogate, list[tuple[str, float]]]:
     """Replay observations, not stored claims or interpretations of true feedback."""
     graph = seed_graph(task, misleading, evidence_file)
-    for claim in frozen_evidence or []:
-        if claim.source != "literature":
-            raise ValueError("Only external literature, not feedback-derived claims, may be frozen.")
-        if claim.id not in graph:
-            graph.add_claim(claim.model_copy(deep=True))
+    if frozen_evidence:
+        bundle = (frozen_evidence if isinstance(frozen_evidence, dict) else
+                  [claim.model_dump(mode="json") for claim in frozen_evidence])
+        ingest_literature(graph, bundle)
     surrogate = Surrogate(task, seed)
     history: list[tuple[str, float]] = []
     for observation in observations:
@@ -79,7 +78,7 @@ def rebuild(task: TaskSpec, observations: list[Observation], seed: int,
 
 def next_decision(config: Config, observations: list[Observation], arm: str, sampling_seed: int,
                   intervention_seed: int = 0, target_id: str | None = None,
-                  frozen_evidence: list[Claim] | None = None) -> tuple[Proposal, dict]:
+                  frozen_evidence: dict | list[Claim] | None = None) -> tuple[Proposal, dict]:
     task, _ = load_task(config.task)
     modified = intervene(observations, task, arm, intervention_seed, target_id)
     graph, surrogate, history = rebuild(task, modified, config.seed,
@@ -108,14 +107,14 @@ def _distance(task: TaskSpec, a: str, b: str) -> float:
 def paired_interventions(config: Config, rounds: int = 4, repeats: int = 3,
                          direct_llm_only: bool = False,
                          frozen: list[Observation] | None = None,
-                         frozen_evidence: list[Claim] | None = None) -> dict:
+                         frozen_evidence: dict | list[Claim] | None = None) -> dict:
     """Frozen-prefix, paired-seed next decisions, plus true-vs-true decoding controls."""
     if config.policy != "llm" and direct_llm_only:
         raise ValueError("Direct LLM-only interventions require the LLM policy.")
     if frozen is None:
         base = run_episode(replace(config, feedback="true"), stop_after=rounds)
         observations = list(base.graph.observations.values())
-        frozen_evidence = [c for c in base.graph.claims.values() if c.source == "literature"]
+        frozen_evidence = external_evidence(base.graph)
     else:
         observations = frozen
     arm_config = replace(config, with_model_advice=not direct_llm_only)
