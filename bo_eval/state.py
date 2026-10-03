@@ -12,6 +12,15 @@ class Node(BaseModel):
     closed_reason: str | None = None
 
 
+class Prior(BaseModel):
+    """LLM belief about where the optimum lies: param -> (best, width as a fraction of the range)."""
+
+    id: str
+    after: str
+    belief: dict[str, tuple[float, float]]
+    reasoning: str
+
+
 class Edge(BaseModel):
     source: str
     target: str
@@ -25,6 +34,7 @@ def _root() -> dict[str, Node]:
 class ReasoningGraph(BaseModel):
     nodes: dict[str, Node] = Field(default_factory=_root)
     edges: list[Edge] = Field(default_factory=list)
+    priors: list[Prior] = Field(default_factory=list)
 
     @property
     def experiments(self) -> list[Node]:
@@ -56,6 +66,7 @@ class ReasoningGraph(BaseModel):
     def to_text(self) -> str:
         lines = [self._label(n) for n in self.nodes.values()]
         lines += [f"{e.source} -> {e.target}: {e.reasoning}" for e in self.edges]
+        lines += [f"{p.id} (set after {p.after}): {p.belief} because {p.reasoning}" for p in self.priors]
         closed = [f"{n.id}: {n.closed_reason}" for n in self.nodes.values() if n.closed]
         if closed:
             lines += ["Closed branches:"] + closed
@@ -73,6 +84,13 @@ class ReasoningGraph(BaseModel):
                 p = "<br/>".join(f"{k}={v:g}" for k, v in n.params.items())
                 lines.append(f'  {n.id}["{n.id}<br/>{p}<br/><b>{n.result:.4g}</b>"]')
         lines += [f'  {e.source} -->|"{q(e.reasoning)}"| {e.target}' for e in self.edges]
+        for p in self.priors:
+            b = "<br/>".join(f"{k}≈{v:g}±{w:g}" for k, (v, w) in p.belief.items())
+            lines.append(f'  {p.id}[/"{p.id}<br/>{b}"/]')
+            lines.append(f'  {p.after} -.->|"{q(p.reasoning)}"| {p.id}')
+        if self.priors:
+            lines.append("  classDef prior fill:#e8f0ff,stroke:#36c")
+            lines.append(f"  class {','.join(p.id for p in self.priors)} prior")
         closed = [n.id for n in self.nodes.values() if n.closed]
         if closed:
             lines.append("  classDef closed fill:#eee,stroke:#999,stroke-dasharray:4")

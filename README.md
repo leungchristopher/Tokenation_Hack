@@ -8,7 +8,7 @@ Inspect eval for LLM-driven experimental optimisation, using a Bayesian-optimisa
 - **Tools** (`bo_eval/tools/`): `run_experiment`, `bayes_opt_suggest` (GP + EI), `add_reasoning`, `close_branch` (Hintikka-style: the node and its descendants are closed and can't be extended), `view_graph`, `submit`.
 - **Reasoning graph** (`bo_eval/state.py`): nodes are experiments (inputs and output), and edges carry reasoning. It is exported to `logs/graphs/*.md` (Mermaid) and `*.json`, and shown in the score explanation.
 - **Scorer** (`bo_eval/scorer.py`): `found_optimal`, `n_experiments`, `regret`.
-- **Solvers** (`bo_eval/solvers.py`): `react`, `react_no_bo`, `react_no_graph`, plus the no-LLM baselines `bo` and `random`. Add more to `SOLVERS`.
+- **Solvers** (`bo_eval/solvers.py`): `react`, `react_prior` (LLM states a domain-knowledge prior via `set_prior`; `bayes_opt_suggest` weights EI by π(x)^(β/n), πBO), `react_no_bo`, `react_no_graph`, plus the no-LLM baselines `bo` and `random`. Add more to `SOLVERS`.
 
 ```bash
 pip install -e .
