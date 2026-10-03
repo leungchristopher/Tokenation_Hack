@@ -15,7 +15,7 @@ from bo_eval.env import TabularEnv
 from bo_eval.graph import Node, Prior
 
 
-def gated_posterior(env: TabularEnv, exps: list[Node], priors: list[Prior]):
+def gated_posterior(env: TabularEnv, exps: list[Node], priors: list[Prior], learn: bool = True):
     """Returns (mean, sd) over every condition in result units, and each gate's (mean, sd) on the trust scale."""
     C, sign = env.encode(env.X), (1.0 if env.goal == "maximize" else -1.0)
     idx = [env.index(e.params) for e in exps]
@@ -29,7 +29,7 @@ def gated_posterior(env: TabularEnv, exps: list[Node], priors: list[Prior]):
     k = GaussianProcessRegressor(kernel, n_restarts_optimizer=2).fit(C[idx], z - Ho.T @ b).kernel_
     Ks, Kinv = k(C[idx], C), np.linalg.inv(k(C[idx]) + 1e-8 * np.eye(len(idx)))
     A = np.eye(len(b)) + Ho @ Kinv @ Ho.T
-    g = np.linalg.solve(A, Ho @ Kinv @ z + b) if len(b) else b
+    g = np.linalg.solve(A, Ho @ Kinv @ z + b) if len(b) and learn else b
     R = H - Ho @ Kinv @ Ks
     mu = Ks.T @ Kinv @ (z - Ho.T @ g) + H.T @ g
     var = k.diag(C) - np.einsum("ij,ij->j", Ks, Kinv @ Ks)

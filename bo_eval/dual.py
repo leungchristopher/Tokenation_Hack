@@ -25,12 +25,14 @@ from bo_eval.gated import gated_posterior
 
 Ask = Callable[[str], Awaitable[str]]
 
+CHALLENGE = """Include at least one hypothesis that challenges the naive "more is better" view (antagonism, interactions,
+non-monotonic or narrow optima), and phrase its query to look for that evidence.
+"""
+
 HYPOTHESISE = """You are planning experiments on {desc}. Goal: {goal}. Parameters and tested ranges: {ranges}.
 From your own domain knowledge, give at most {k} hypotheses about where the optimum lies that should change where
 to look first (optimal levels, interactions, antagonism, inhibition at high levels).
-Include at least one hypothesis that challenges the naive "more is better" view (antagonism, interactions,
-non-monotonic or narrow optima), and phrase its query to look for that evidence.
-Answer only JSON: {{"hypotheses": [{{"claim": "...", "query": "literature search query",
+{challenge}Answer only JSON: {{"hypotheses": [{{"claim": "...", "query": "literature search query",
 "belief": {{"<param>": [best_value, width as a fraction of the range]}}}}]}}"""
 
 CALIBRATE = """Hypothesis about {desc}: {claim}
@@ -56,19 +58,24 @@ async def calibrate(s: Session, think: Ask, search: Ask, claim: str, query: str,
             "sources": r.get("sources") or ["(no source found)"]}
 
 
-async def hypothesise(s: Session, think: Ask, search: Ask) -> None:
+async def hypothesise(s: Session, think: Ask, search: Ask, literature: bool = True, challenge: bool = True) -> None:
     env = s.env
     ranges = {p: [float(env.X[:, j].min()), float(env.X[:, j].max())] for j, p in enumerate(env.params)}
-    out = await ask(think, HYPOTHESISE.format(desc=env.description, goal=env.goal, ranges=ranges, k=max(s.max_searches // 2, 1)))
+    out = await ask(think, HYPOTHESISE.format(desc=env.description, goal=env.goal, ranges=ranges, k=max(s.max_searches // 2, 1),
+                                           challenge=CHALLENGE if challenge else ""))
     for h in out.get("hypotheses", [])[: s.max_searches]:
         belief = {p: b for p, b in (h.get("belief") or {}).items() if p in env.params and len(b) == 2 and b[1] > 0}
         if belief:
-            s.cite(h["claim"], **await calibrate(s, think, search, h["claim"], h["query"]), about=list(belief), belief=belief)
+            r = (await calibrate(s, think, search, h["claim"], h["query"]) if literature else
+                 {"trust": 0.5, "trust_reason": "LLM judgement only (no literature search)", "sources": ["(none)"]})
+            s.cite(h["claim"], **r, about=list(belief), belief=belief)
 
 
-async def explore(s: Session, think: Ask, search: Ask, refocus: float = 0.3) -> dict[str, float]:
-    """Run the budget; return each prior's learned gate (on the trust scale)."""
-    await hypothesise(s, think, search)
+async def explore(s: Session, think: Ask, search: Ask, refocus: float = 0.3, priors: bool = True, learn: bool = True,
+                  literature: bool = True, challenge: bool = True) -> dict[str, float]:
+    """Run the budget; return each prior's learned gate (on the trust scale). The flags switch parts off for ablation."""
+    if priors:
+        await hypothesise(s, think, search, literature, challenge)
     env, sign, gates, refocused = s.env, (1.0 if s.env.goal == "maximize" else -1.0), {}, set()
     while len(exps := s.graph.experiments) < s.budget:
         priors, open_ = s.graph.priors, [e for e in exps if not e.closed]
@@ -77,7 +84,7 @@ async def explore(s: Session, think: Ask, search: Ask, refocus: float = 0.3) -> 
             sug = s.suggest(1)[0]
             i, why = env.index(sug["params"]), sug["reason"]
         else:
-            mu, sd, g, gsd = gated_posterior(env, exps, priors)
+            mu, sd, g, gsd = gated_posterior(env, exps, priors, learn)
             gates = {p.id: round(float(x), 2) for p, x in zip(priors, g)}
             best = max(sign * e.result for e in exps)
             u = (sign * mu - best) / sd
@@ -89,7 +96,7 @@ async def explore(s: Session, think: Ask, search: Ask, refocus: float = 0.3) -> 
                 if e.id != inc.id and e.id in s.graph.open_leaves() and sign * bound < sign * mu[idx[inc.id]]:
                     s.close(e.id, f"GP bound {bound:.3g} cannot beat {inc.id} (predicted {mu[idx[inc.id]]:.3g})")
             for p, gp, gs in zip(priors, g, gsd):  # narrow spotlight: data disagrees with the literature
-                if p.id not in refocused and abs(gp - p.trust) > refocus and gs < refocus / 2 and s.searches < s.max_searches:
+                if literature and p.id not in refocused and abs(gp - p.trust) > refocus and gs < refocus / 2 and s.searches < s.max_searches:
                     refocused.add(p.id)
                     ev = next(v for v in s.graph.evidence if p.id in v.about)
                     seen = f"Experiments so far gate it at {gp:.2f} against literature trust {p.trust:.2f}.\n"
@@ -107,6 +114,6 @@ async def explore(s: Session, think: Ask, search: Ask, refocus: float = 0.3) -> 
         C = env.encode(np.array([list(params.values())] + [list(e.params.values()) for e in open_]))
         parent = open_[int(((C[1:] - C[0]) ** 2).sum(1).argmin())].id if open_ else "root"
         s.run(params, parent, why)
-    mu, *_ = gated_posterior(env, s.graph.experiments, s.graph.priors)
+    mu, *_ = gated_posterior(env, s.graph.experiments, s.graph.priors, learn)
     s.submit(max(s.graph.experiments, key=lambda e: sign * mu[env.index(e.params)]).params)
     return gates

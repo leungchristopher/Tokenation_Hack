@@ -76,7 +76,7 @@ def random_baseline():
 
 
 @solver
-def dual_solver():
+def dual_solver(**ablate):
     """Dual spotlight: gated-prior GP (broad) + targeted literature search (narrow); see bo_eval/dual.py."""
     async def think(prompt: str) -> str:
         return (await get_model().generate(prompt)).completion
@@ -85,7 +85,7 @@ def dual_solver():
         search = amass_search if os.environ.get("AMASS_API_KEY") else web_literature
         st = store_as(BOState)
         s = st.session
-        state.metadata["gates"] = await explore(s, think, search)
+        state.metadata["gates"] = await explore(s, think, search, **ablate)
         st.session = s
         return state
 
@@ -101,4 +101,8 @@ SOLVERS = {
     "bo": bo_baseline,
     "random": random_baseline,
     "dual": dual_solver,
+    "dual_fixed_gates": lambda: dual_solver(learn=False),
+    "dual_no_lit": lambda: dual_solver(literature=False),
+    "dual_no_prior": lambda: dual_solver(priors=False),
+    "dual_naive_prompt": lambda: dual_solver(challenge=False),
 }
