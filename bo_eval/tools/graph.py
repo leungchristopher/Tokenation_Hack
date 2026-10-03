@@ -22,11 +22,11 @@ def add_reasoning():
 @tool
 def close_branch():
     async def execute(node: str, reason: str) -> str:
-        """Close a branch: mark a node and all its descendants as unable to contain the optimum. Closed branches cannot be extended.
+        """Close a branch: record why it is no longer pursued. Closed branches cannot be extended.
 
         Args:
             node: Id of the node at the top of the branch.
-            reason: Why this branch cannot contain the optimum.
+            reason: Evidence for not pursuing it, with uncertainty; closure is not proof of optimality.
         """
         closed = use_session(lambda s: s.close(node, reason))
         return f"Closed: {', '.join(closed) or 'nothing (already closed)'}."

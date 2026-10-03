@@ -1,50 +1,28 @@
 """Black-box experiment environments backed by measured data."""
 
-from dataclasses import dataclass
 from functools import cache, cached_property
 from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
 
+from bo_eval.domain import Domain
+
 DATA = Path(__file__).resolve().parent.parent / "data"
+if not DATA.is_dir():
+    DATA = Path(sys.prefix) / "share" / "bo-eval" / "data"
 
 
-@dataclass
-class TabularEnv:
+class TabularEnv(Domain):
     """Each run snaps to the nearest measured condition and returns a draw from N(mean, sd)."""
 
-    name: str
-    description: str
-    df: pd.DataFrame
-    params: list[str]
-    mean_col: str
-    sd_col: str
-    goal: str = "maximize"
-    log: tuple[str, ...] = ()
+    def __init__(self, name, description, df, params, mean_col, sd_col, goal="maximize", log=()):
+        self.df, self.mean_col, self.sd_col = df, mean_col, sd_col
+        super().__init__(name, description, params, df[params].to_numpy(float), self._evaluate, goal, tuple(log))
 
-    @cached_property
-    def X(self) -> np.ndarray:
-        return self.df[self.params].to_numpy(float)
-
-    def encode(self, X: np.ndarray) -> np.ndarray:
-        """Scale each parameter to [0, 1]; parameters in `log` are scaled in log10."""
-        lg = np.isin(self.params, self.log)
-        X, ref = (np.where(lg, np.log10(np.maximum(a, 1e-12)), a) for a in (np.asarray(X, float), self.X))
-        lo, hi = ref.min(0), ref.max(0)
-        return (X - lo) / np.where(hi > lo, hi - lo, 1.0)
-
-    def index(self, params: dict) -> int:
-        missing = set(self.params) - set(params)
-        if missing:
-            raise ValueError(f"Missing parameters: {sorted(missing)}")
-        x = np.array([[float(params[p]) for p in self.params]])
-        return int(np.argmin(((self.encode(self.X) - self.encode(x)) ** 2).sum(1)))
-
-    def condition(self, i: int) -> dict:
-        return {p: float(self.df[p].iloc[i]) for p in self.params}
-
-    def sample(self, i: int, rng: np.random.Generator) -> float:
+    def _evaluate(self, params: dict, rng: np.random.Generator) -> float:
+        i = self.index(params)
         row = self.df.iloc[i]
         return float(max(0.0, rng.normal(row[self.mean_col], row[self.sd_col])))
 
@@ -55,21 +33,6 @@ class TabularEnv:
     def optimum(self) -> int:
         y = self.df[self.mean_col].to_numpy()
         return int(np.argmax(y) if self.goal == "maximize" else np.argmin(y))
-
-    def prompt(self, budget: int) -> str:
-        def levels(p):
-            v = sorted(self.df[p].unique().tolist())
-            return v if len(v) <= 12 else f"{len(v)} levels in [{v[0]}, {v[-1]}]"
-
-        lines = "\n".join(f"- {p}: {levels(p)}" for p in self.params)
-        return (
-            f"Goal: {self.goal} {self.description}.\n"
-            f"Parameters and their available levels:\n{lines}\n"
-            f"Only {len(self.df)} combinations are feasible; requested settings are snapped to the "
-            f"nearest feasible condition. Measurements are noisy.\n"
-            f"Experiment budget: {budget}. You are scored on finding the true optimum "
-            f"using as few experiments as possible."
-        )
 
     @classmethod
     def from_csv(cls, name: str, file: str, description: str, mean_col: str, sd_col: str, params=None, goal: str = "maximize", log=()):
