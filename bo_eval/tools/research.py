@@ -1,6 +1,7 @@
 """Research agent: searches the literature and adds cited, trust-weighted evidence to the reasoning graph."""
 
 from inspect_ai.agent import as_tool, react
+from inspect_ai.model import GenerateConfig, get_model
 from inspect_ai.tool import ToolError, tool, web_search
 from inspect_ai.util import store_as
 
@@ -8,7 +9,7 @@ from bo_eval.env import get_env
 from bo_eval.state import BOState, Evidence, Prior
 
 RESEARCH = """You are a research agent supporting an experimentalist who is optimising a black-box system.
-Search the literature with web_search and record what you find with cite_evidence. Every claim needs sources
+Search the literature with literature_search and record what you find with cite_evidence. Every claim needs sources
 (DOI or URL of the paper you actually found). Score trust in [0, 1]: how far the finding should be believed
 *for this exact system* (same cell line / enzyme / lysate, similar ranges and assay, replicated, effect size),
 and explain the score. Prefer findings that change what to test (interactions, antagonism, non-monotonicity,
@@ -16,6 +17,31 @@ inhibition at high levels) over textbook generalities. When asked to critique a 
 literature that contradicts it as well as supports it. If the evidence implies where the optimum lies, pass a
 belief; bayes_opt_suggest then weights its suggestions by it in proportion to the trust you give it.
 Finish with a short summary that cites the evidence ids."""
+
+
+@tool
+def literature_search():
+    async def execute(query: str) -> str:
+        """Search the web/literature and return a summary of findings with DOIs/URLs.
+
+        Args:
+            query: What to look for, e.g. "taxol doxorubicin antagonism A549 combination index".
+        """
+        s = store_as(BOState)
+        if s.searches >= s.max_searches:
+            raise ToolError(f"Search budget ({s.max_searches}) used up; record evidence from what you have.")
+        s.searches += 1
+        # Isolated generate: provider-side search blocks never mix with client tool calls in one history.
+        out = await get_model().generate(
+            "Search the scientific literature for: " + query + "\nReport each relevant finding with its system "
+            "(cell line/enzyme, doses), effect size and the DOI or URL, and note conflicting reports. "
+            "Be concise: at most 5 findings, under 300 words.",
+            tools=[web_search({"anthropic": {"max_uses": 4}})],
+            config=GenerateConfig(max_tokens=2000),
+        )
+        return out.completion
+
+    return execute
 
 
 @tool
@@ -68,7 +94,7 @@ def researcher():
         name="researcher",
         description="Searches the literature and adds cited, trust-scored evidence (and optionally a prior) to the reasoning graph.",
         prompt=RESEARCH,
-        tools=[web_search(["anthropic"]), cite_evidence()],
+        tools=[literature_search(), cite_evidence()],
     )
     return as_tool(agent, description="Ask the research agent a literature question or to critique a plan/result. "
                    "It records cited evidence (R nodes) in the graph and returns a summary.")

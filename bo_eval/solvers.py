@@ -32,10 +32,11 @@ again when a result surprises you or before closing a branch, and cite the evide
 
 
 @solver
-def init_bo(budget: int, seed: int = 0):
+def init_bo(budget: int, seed: int = 0, max_searches: int = 6):
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         s = store_as(BOState)
         s.env, s.budget, s.seed = state.metadata["env"], budget, seed * 1000 + state.epoch
+        s.max_searches = max_searches
         return state
 
     return solve

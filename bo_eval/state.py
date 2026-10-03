@@ -124,3 +124,5 @@ class BOState(StoreModel):
     seed: int = 0
     graph: ReasoningGraph = Field(default_factory=ReasoningGraph)
     submission: dict[str, float] | None = None
+    searches: int = 0
+    max_searches: int = 6
