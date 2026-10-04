@@ -101,6 +101,7 @@ def summary(base, model, calls, meta):
                 fallback_rate=len(fallbacks)/asked if asked else None,
                 fallback_types={f:fallbacks.count(f) for f in set(fallbacks)},
                 sources_retrieved=sum(len(r['sources']) for r in model),
+                unique_sources=len({x['url'] for r in model for x in r['sources']}),
                 search_failures=sum(len(r['search_failures']) for r in model),
                 cited_valid_decisions=sum(r['cited'] for r in model),
                 prompt_tokens=sum(c.get('prompt_tokens') or 0 for c in calls),
@@ -131,7 +132,7 @@ async def inspect_arm(args, base):
     start = time.monotonic()
     runs = list(await asyncio.gather(*[episode(s, args.budget, args.cv, text_chooser(generate),
                                                research) for s in args.seeds]))
-    return summary(base, runs, calls, dict(mode='LIVE Inspect provider'+' + Amass literature'*args.literature+f' + frozen corpus {args.corpus}'*bool(args.corpus),
+    return summary(base, runs, calls, dict(mode='LIVE Inspect provider'+' + Amass literature'*args.literature+f' + frozen corpus {args.corpus} (no per-episode API retrieval)'*bool(args.corpus),
                                            model=args.inspect_model,
                                            session_wall_s=time.monotonic()-start))
 
@@ -166,8 +167,9 @@ if __name__ == '__main__':
     parser.add_argument('--cv', type=float, default=0.15)
     parser.add_argument('--offline', action='store_true')
     parser.add_argument('--inspect-model', help='Inspect model ID instead of Modal')
-    parser.add_argument('--literature', action='store_true', help='Amass search (needs AMASS_API_KEY)')
-    parser.add_argument('--corpus', help='JSON list of retained source records instead of live search')
+    research = parser.add_mutually_exclusive_group()
+    research.add_argument('--literature', action='store_true', help='Live Amass search (needs AMASS_API_KEY)')
+    research.add_argument('--corpus', help='Frozen JSON of retrieved records; no per-episode API retrieval')
     parser.add_argument('--out')
     args = parser.parse_args()
     report = asyncio.run(main(args))
