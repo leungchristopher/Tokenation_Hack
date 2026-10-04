@@ -97,7 +97,12 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
         raise ValueError('One distinct parameter name per candidate column is required.')
     direction = 1 if goal == 'maximize' else -1
     rng = np.random.default_rng(seed)
-    graph = {'nodes': [], 'edges': [], 'objective': objective, 'goal': goal, 'stop': 'running'}
+    graph = {'nodes': [], 'edges': [], 'objective': objective, 'goal': goal, 'stop': 'running',
+             'legend': dict(uncertainty=[
+                'GP predictive SD is an approximation, not calibrated confidence.',
+                'Delivered settings are simulated estimates with their own SD.',
+                'Cited literature carries a stated transfer limit; retrieved-only sources are not evidence.',
+                'A node without a stated confidence has none estimated; that is not certainty.'])}
     observations, papers, deferred = [], [], {}
     searches, check_id = 0, None
 
@@ -106,8 +111,16 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
         graph['nodes'].append(dict(id=ident, kind=kind, **data))
         return ident
 
-    def edge(source, target, reason):
-        graph['edges'].append(dict(source=source, target=target, reason=reason))
+    def edge(source, target, reason, relation=None, **meta):
+        graph['edges'].append(dict(source=source, target=target, reason=reason,
+                                   **({'relation': relation} if relation else {}), **meta))
+
+    def find(ident):
+        return graph['nodes'][int(ident[1:])]
+
+    def source_label(title):
+        text = (title or 'Untitled source').strip()
+        return text if len(text) <= 48 else text[:45].rstrip()+'…'
 
     root = node('goal', reason=f'{goal.capitalize()} {objective} within the experiment budget.',
                 uncertainty='Optimisation of an observed proxy does not verify the underlying objective. '
@@ -125,11 +138,13 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
                 found = await research(context)
                 for p in found:
                     p = dict(p)
-                    p['id'] = node('source', **{k:v for k,v in p.items() if k != 'id'})
+                    p['id'] = node('source', round=step+1, label=source_label(p.get('title')),
+                                   **{k:v for k,v in p.items() if k != 'id'})
                     papers.append(p)
             except Exception as error:
                 nid = node('search_failure', reason=type(error).__name__)
-                edge(root, nid, 'No evidence obtained; continue with measured feedback.')
+                edge(root, nid, 'No evidence obtained; continue with measured feedback.',
+                     relation='search_failed')
         forced = check_id
         if forced is not None and forced not in {o['candidate'] for o in options}:
             options.append(dict(candidate=forced, mean=None, sd=None, ei=None, reason='Diagnostic repeat.'))
@@ -154,28 +169,40 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
                 decision['fallback'] = type(error).__name__
         selected = decision['selected']
         d = node('decision', round=step+1, **decision, options=context['options'])
-        edge(root if not observations else observations[-1]['id'], d, 'Evidence available before selection.')
+        edge(root if not observations else observations[-1]['id'], d,
+             'Evidence available before selection.', relation='informs')
         for prior in deferred.pop(selected, []):
-            edge(prior, d, 'Reconsidered and selected; the earlier deferral was not a refutation.')
+            edge(prior, d, 'Reconsidered and selected; the earlier deferral was not a refutation.',
+                 relation='reconsidered')
         branch_nodes = {selected:d}
         for i, why in decision['alternatives'].items():
             a = node('deferred', candidate=int(i), reason=why, status='Reconsiderable; not falsified.')
             deferred.setdefault(int(i), []).append(a)
             branch_nodes[int(i)] = a
-            edge(d, a, 'Not selected in this round.')
+            edge(d, a, 'Not selected in this round.', relation='defers')
+        cited = {c['id'] for c in decision['citations']}
         for citation in decision['citations']:
-            edge(citation['id'], branch_nodes[citation.get('candidate', selected)],
-                 'Literature interpretation: '+citation['transfer_limit'])
+            branch = citation.get('candidate', selected)
+            # Quote and limit stay scoped to this edge and this round's branch.
+            edge(citation['id'], branch_nodes[branch],
+                 'Literature interpretation: '+citation['transfer_limit'], relation='cites',
+                 citation=dict(round=step+1, candidate=branch,
+                               quote=citation['quote'], transfer_limit=citation['transfer_limit']))
+            target = find(branch_nodes[branch])
+            target['cited'] = sorted(set(target.get('cited', []) + [citation['id']]))
+            paper_node = find(citation['id'])
+            paper_node['cited_in'] = sorted(set(paper_node.get('cited_in', []) + [step+1]))
         for paper in papers:
-            if paper['id'] not in {c['id'] for c in decision['citations']}:
-                edge(paper['id'], d, 'Retrieved but not cited as a selection reason.')
+            if paper['id'] not in cited:
+                edge(paper['id'], d, 'Retrieved but not cited as a selection reason.',
+                     relation='retrieved')
         # Decision is committed before execution. No result can rewrite its rationale.
         on_event('decision', graph)
         observation = execute(dict(zip(names, X[selected].tolist())))
         observation.update(candidate=selected)
         oid = node('observation', round=step+1, **observation)
         observation['id'] = oid
-        edge(d, oid, 'Executed this decision.')
+        edge(d, oid, 'Executed this decision.', relation='executes')
         observations.append(observation)
         check_id = None
         if gp is not None and observation['value'] is not None and forced is None:
@@ -203,7 +230,7 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
     final = node('recommendation', **result)
     for o in observations:
         if o['candidate'] == best:
-            edge(o['id'], final, 'Observed result used in the protocol mean.')
+            edge(o['id'], final, 'Observed result used in the protocol mean.', relation='aggregates')
     on_event('recommendation', graph)
     return dict(result=result, graph=graph, observations=observations)
 
