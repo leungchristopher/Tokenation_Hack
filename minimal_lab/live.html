@@ -41,18 +41,20 @@ function show(id){const n=byId(id);if(!n)return;
   const cites=related.filter(e=>relOf(e)==='cites'),retrieved=related.filter(e=>relOf(e)==='retrieved');
   el('h3','Literature attribution',b);
   const mine=[];
-  if(n.kind==='decision')for(const c of n.citations||[])mine.push({...c,round:n.round});
+  if(n.kind==='decision')for(const c of n.citations||[])mine.push({...c,round:n.round,
+    branch:`C${c.candidate??n.selected} · ${(c.candidate??n.selected)===n.selected?'selected':'deferred'}`});
   if(n.kind==='deferred'){const via=graph.edges.find(e=>e.target===n.id&&relOf(e)==='defers'),d=via&&byId(via.source);
     // Quotes stay scoped to the decision that created this branch, not a later round on the same candidate.
-    if(d)for(const c of (d.citations||[]).filter(c=>(c.candidate??d.selected)===n.candidate))mine.push({...c,round:d.round});
-    for(const e of cites.filter(e=>e.target===n.id)){const c=e.citation||{};if(c.quote&&!mine.some(m=>m.id===e.source&&m.quote===c.quote))mine.push({id:e.source,quote:c.quote,transfer_limit:c.transfer_limit,round:c.round})}}
-  if(n.kind==='source')for(const e of cites.filter(e=>e.source===n.id)){const c=e.citation||{},t=byId(e.target);mine.push({id:n.id,quote:c.quote,transfer_limit:c.transfer_limit||(e.reason||'').replace('Literature interpretation: ',''),round:c.round||t?.round,to:e.target})}
+    if(d)for(const c of (d.citations||[]).filter(c=>(c.candidate??d.selected)===n.candidate))mine.push({...c,round:d.round,branch:`C${n.candidate} · deferred`});
+    for(const e of cites.filter(e=>e.target===n.id)){const c=e.citation||{};if(c.quote&&!mine.some(m=>m.id===e.source&&m.quote===c.quote))mine.push({id:e.source,quote:c.quote,transfer_limit:c.transfer_limit,round:c.round,branch:`C${n.candidate} · deferred`})}}
+  if(n.kind==='source')for(const e of cites.filter(e=>e.source===n.id)){const c=e.citation||{},t=byId(e.target);mine.push({id:n.id,quote:c.quote,transfer_limit:c.transfer_limit||(e.reason||'').replace('Literature interpretation: ',''),round:c.round||t?.round,to:e.target,
+    branch:t?(t.kind==='deferred'?`C${t.candidate} · deferred`:`C${t.selected} · selected`):''})}
   if(!mine.length&&!retrieved.length&&!cites.length)el('p','No literature source is attached to this node.',b);
   for(const c of mine){const s=byId(c.id),box=el('div',null,b,'evidence');
     if(s)srcLink(s,box);else el('p',c.id,box);
     if(c.quote)el('blockquote',`“${c.quote}”`,box);
     if(c.transfer_limit)el('p',`Transfer limit: ${c.transfer_limit}`,box,'muted');
-    el('p',`Cited in round ${c.round??'?'}${c.to?' → '+c.to:''} · qualitative support, not a verified effect or calibrated probability.`,box,'muted');}
+    el('p',`Round ${c.round??'?'}${c.branch?' · '+c.branch:''}${c.to?' → '+c.to:''} · qualitative support, not a verified effect or calibrated probability.`,box,'muted');}
   for(const e of retrieved){const s=byId(e.source===n.id?e.target:e.source);if(!s||s.kind!=='source')continue;const box=el('div',null,b,'evidence');srcLink(s,box);el('p','Retrieved but not cited as a decision reason — not evidence for this node.',box,'muted');}
   if(n.kind==='source'){if(n.query)el('p',`Retrieved via query: “${n.query}”`,b,'muted');
     const rounds=n.cited_in||cites.map(e=>e.citation?.round).filter(Boolean);

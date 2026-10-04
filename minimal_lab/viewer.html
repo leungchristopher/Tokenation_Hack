@@ -37,15 +37,17 @@ function show(n){detail.replaceChildren();
   // Citations are scoped to the node that made them; an earlier quote never migrates to a later round.
   const cites=graph.edges.filter(e=>relOf(e)==='cites'&&(e.source===n.id||e.target===n.id));
   const mine=[];
-  if(n.kind==='decision')for(const c of n.citations||[])mine.push({...c,round:n.round});
+  if(n.kind==='decision')for(const c of n.citations||[])mine.push({...c,round:n.round,
+    branch:`C${c.candidate??n.selected} · ${(c.candidate??n.selected)===n.selected?'selected':'deferred'}`});
   if(n.kind==='deferred'){const via=graph.edges.find(e=>e.target===n.id&&relOf(e)==='defers'),d=via&&byId(via.source);
-    if(d)for(const c of (d.citations||[]).filter(c=>(c.candidate??d.selected)===n.candidate))mine.push({...c,round:d.round});
-    for(const e of cites.filter(e=>e.target===n.id)){const c=e.citation||{};if(c.quote&&!mine.some(m=>m.id===e.source&&m.quote===c.quote))mine.push({id:e.source,quote:c.quote,transfer_limit:c.transfer_limit,round:c.round})}}
-  if(n.kind==='source')for(const e of cites.filter(e=>e.source===n.id)){const c=e.citation||{},t=byId(e.target);mine.push({id:n.id,quote:c.quote,transfer_limit:c.transfer_limit||(e.reason||'').replace('Literature interpretation: ',''),round:c.round||t?.round,to:e.target})}
+    if(d)for(const c of (d.citations||[]).filter(c=>(c.candidate??d.selected)===n.candidate))mine.push({...c,round:d.round,branch:`C${n.candidate} · deferred`});
+    for(const e of cites.filter(e=>e.target===n.id)){const c=e.citation||{};if(c.quote&&!mine.some(m=>m.id===e.source&&m.quote===c.quote))mine.push({id:e.source,quote:c.quote,transfer_limit:c.transfer_limit,round:c.round,branch:`C${n.candidate} · deferred`})}}
+  if(n.kind==='source')for(const e of cites.filter(e=>e.source===n.id)){const c=e.citation||{},t=byId(e.target);mine.push({id:n.id,quote:c.quote,transfer_limit:c.transfer_limit||(e.reason||'').replace('Literature interpretation: ',''),round:c.round||t?.round,to:e.target,
+    branch:t?(t.kind==='deferred'?`C${t.candidate} · deferred`:`C${t.selected} · selected`):''})}
   if(mine.length){el('h3','Cited support',detail);for(const c of mine){const s=byId(c.id);
     if(s)el('p',`${s.id} · ${srcName(s)}`,detail);if(c.quote)el('blockquote',`“${c.quote}”`,detail);
     if(c.transfer_limit)el('p',`Transfer limit: ${c.transfer_limit}`,detail);
-    el('p',`Cited in round ${c.round??'?'}${c.to?' → '+c.to:''} · qualitative support, not a verified effect.`,detail)}}
+    el('p',`Round ${c.round??'?'}${c.branch?' · '+c.branch:''}${c.to?' → '+c.to:''} · qualitative support, not a verified effect.`,detail)}}
   const retrieved=graph.edges.filter(e=>relOf(e)==='retrieved'&&(e.source===n.id||e.target===n.id));
   if(retrieved.length){el('h3','Retrieved, not cited',detail);for(const e of retrieved){const s=byId(e.source===n.id?e.target:e.source);if(s?.kind==='source')el('p',`${s.id} · ${srcName(s)} — not evidence for this node.`,detail)}}
   if(n.url&&/^https:\/\//.test(n.url)){const a=document.createElement('a');a.href=n.url;a.textContent='Open source';a.target='_blank';a.rel='noopener noreferrer';detail.append(a)}
