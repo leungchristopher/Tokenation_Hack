@@ -374,6 +374,39 @@ def test_html_is_self_contained_accessible_and_ids_are_unique(episode):
     assert "No experiments or observed final answer." in to_html(empty)
 
 
+def test_interactive_graph_has_one_canvas_and_incumbent_dependencies(episode):
+    content = to_html(episode)
+    assert content.count('data-a-diagram-canvas="true"') == 1
+    assert content.count('data-a-node="true"') == len(episode.decisions) + 2
+    assert "graph-contract" not in content
+    assert "No literature used in this run." in content
+    assert "data-close-detail" in content
+    for decision in episode.decisions[3:]:
+        earlier = [o for o in episode.graph.observations.values()
+                   if o.round < decision.round and o.value_shown is not None]
+        incumbent = (max if episode.task.direction == "maximize" else min)(earlier, key=lambda o: o.value_shown)
+        assert f'data-edge-source="D{incumbent.round}" data-edge-target="{decision.id}"' in content
+        assert f'&quot;ei_reference&quot;: &quot;{incumbent.id}&quot;' in content
+    assert "the GP uses all prior data" in content
+    assert "Full record" in content and "95% predictive interval" in content
+
+
+def test_compact_graph_does_not_invent_literature_influence(episode):
+    copy = replace(episode, graph=EvidenceGraph.model_validate_json(episode.graph.model_dump_json()))
+    ingest_literature(copy.graph, records_to_claims([
+        {"title": "Independent assay", "doi": "10.1234/fixture", "abstract": "FULL_RAW_ABSTRACT_SENTINEL"},
+    ]))
+    content = to_html(copy)
+    assert 'data-edge-source="E1" data-edge-target="L1" data-edge-kind="supports"' in content
+    assert "Not used in acquisition" in content
+    assert 'data-edge-source="L1" data-edge-target="D' not in content
+    root = ET.fromstring(re.search(r"<svg xmlns=.*?</svg>", content, re.S)[0])
+    ns = {"s": "http://www.w3.org/2000/svg"}
+    visible = " ".join("".join(n.itertext()) for n in root.findall(".//s:text", ns))
+    assert "FULL_RAW_ABSTRACT_SENTINEL" not in visible
+    assert "FULL_RAW_ABSTRACT_SENTINEL" in content
+
+
 def test_optional_inspect_adapter_imports_without_running_evaluations():
     from epistemic.inspect_task import experimental_design
     assert experimental_design(budget=1).solver

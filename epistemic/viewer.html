@@ -1184,7 +1184,7 @@ details.a-disclosure[open] > summary::before {
     <main class="a-shell">
       <header class="a-header">
         <div>
-          <h1 class="a-header__title">Scientific reasoning graph</h1>
+          <h1 class="a-header__title">Reasoning graph</h1>
           <p class="a-header__subtitle">Immutable evidence, scoped claims, uncertainty and the reasoning behind each experiment.</p>
         </div>
         <button
@@ -2230,6 +2230,13 @@ __EPISTEMIC_BODY__
     var view = { x: 0, y: 0, scale: 1 };
     var drag = null;
 
+    var point = function (event) {
+      var cursor = svg.createSVGPoint();
+      cursor.x = event.clientX;
+      cursor.y = event.clientY;
+      return cursor.matrixTransform(svg.getScreenCTM().inverse());
+    };
+
     var render = function () {
       viewport.setAttribute(
         "transform",
@@ -2238,21 +2245,28 @@ __EPISTEMIC_BODY__
     };
 
     var zoomBy = function (factor) {
-      view.scale = Math.min(2.5, Math.max(0.5, view.scale * factor));
+      var scale = Math.min(4, Math.max(0.5, view.scale * factor));
+      var center = svg.viewBox.baseVal;
+      var cx = center.x + center.width / 2;
+      var cy = center.y + center.height / 2;
+      view.x = cx - (cx - view.x) * scale / view.scale;
+      view.y = cy - (cy - view.y) * scale / view.scale;
+      view.scale = scale;
       render();
     };
 
     svg.addEventListener("pointerdown", function (event) {
       if (event.target.closest("[data-a-node]")) return;
-      drag = { x: event.clientX, y: event.clientY };
+      drag = point(event);
       svg.setPointerCapture(event.pointerId);
     });
 
     svg.addEventListener("pointermove", function (event) {
       if (!drag) return;
-      view.x += event.clientX - drag.x;
-      view.y += event.clientY - drag.y;
-      drag = { x: event.clientX, y: event.clientY };
+      var cursor = point(event);
+      view.x += cursor.x - drag.x;
+      view.y += cursor.y - drag.y;
+      drag = cursor;
       render();
     });
 

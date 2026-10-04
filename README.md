@@ -22,9 +22,9 @@ expected improvement under a Matérn GP. Evidence annotations do not change its 
 
 ### Outputs
 
-- `graph.html`: standalone interactive actions/reasoning, evidence, and detailed experiment views.
+- `graph.html`: one compact Mermaid-style graph with pan/zoom and click-to-open records.
 - `actions.svg` / `actions.json`: actions as nodes, reasons as edges, and explicit final selection.
-- `evidence.svg` / `experiments.svg` / `graph.svg`: individual and combined printable views.
+- `graph.svg`: the compact graph; `evidence.svg` / `experiments.svg`: detailed printable exports.
 - `final.json`: selected candidate, observed value, selection rule and uncertainty references.
 - `graph.json`, `trajectory.jsonl`, `audit.md`, `config.json`: records and decision provenance.
 - `hidden_truth.jsonl`, `hidden_provenance.json`, `metrics.json`: evaluator-only diagnostics.
@@ -32,6 +32,9 @@ expected improvement under a Matérn GP. Evidence annotations do not change its 
 Best observed is not a proven optimum. Noise can misrank candidates. Reported delivery is not
 the hidden realised condition, and GP intervals do not establish calibration. Evaluator metrics
 separately record the best realised mean, final intended mean and regret; they are not model inputs.
+Compact branches identify the best-observed EI reference, not causal ancestry or closed regions.
+The GP uses all prior observations. Source and claim links appear only when recorded; unused
+literature is explicitly labelled, not presented as influencing acquisition.
 
 ## Tasks and limitations
 
