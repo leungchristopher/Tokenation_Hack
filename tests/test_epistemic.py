@@ -549,7 +549,7 @@ def test_bounded_literature_calibrates_prior_and_exports_gate_provenance(tmp_pat
     assert metrics["literature_searches"] == 1 and metrics["active_literature_priors"] == 1
     html = to_html(episode)
     assert "Initial trust: 0.60" in html and "Numerical prior used in acquisition" in html
-    assert "Literature prior: gate" in html
+    assert "Prior in" in html and "Used by D" in html
     assert "Cell-line and timing" in html
     assert "Largest expected" in html
     assert 'data-a-edge="true" tabindex="0" role="button"' in html

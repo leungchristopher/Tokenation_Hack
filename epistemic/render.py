@@ -630,9 +630,26 @@ def to_svg(episode: Episode) -> str:
         _edge(edges, source=parent, target=target, kind="depends_on",
               start=(sx + 240, sy + 68), end=(tx, ty + 68), note=note, label=label)
     aliases = {o.id: f"D{o.round}" for o in episode.graph.observations.values()}
+    prior_uses: dict[str, list[str]] = {}
+    for edge in episode.graph.edges:
+        if edge.kind == "depends_on" and edge.source in nodes and edge.target in episode.graph.claims \
+                and episode.graph.claims[edge.target].belief:
+            prior_uses.setdefault(edge.target, []).append(edge.source)
     for edge in episode.graph.edges:
         source_id, target_id = aliases.get(edge.source, edge.source), aliases.get(edge.target, edge.target)
         if source_id not in positions or target_id not in positions or edge.kind == "tests":
+            continue
+        uses = prior_uses.get(target_id, [])
+        if edge.kind == "depends_on" and source_id in uses:
+            if source_id != uses[-1]:
+                continue
+            sx, sy = positions[target_id]
+            tx, ty = positions[source_id]
+            label = f"Prior in {len(uses)} GP decisions; latest {edge.note}"
+            _edge(edges, source=target_id, target=source_id, kind="depends_on",
+                  start=(sx + 240, sy + heights[target_id] / 2), end=(tx, ty + heights[source_id] / 2),
+                  note=f"Used by {', '.join(uses)}. Latest {edge.note}. Gates are signed coefficients, "
+                       "not probabilities; per-decision gates are in each trial's details.", label=label)
             continue
         sx, sy = positions[source_id]
         tx, ty = positions[target_id]
