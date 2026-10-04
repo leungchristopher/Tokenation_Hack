@@ -12,8 +12,7 @@ dependencies = ["numpy", "pandas", "pydantic>=2", "scipy", "scikit-learn"]
 
 [project.optional-dependencies]
 inspect = ["inspect_ai", "httpx"]
-literature = ["httpx"]
-model = ["httpx"]
+llm = ["httpx"]
 dev = ["pytest", "ruff", "mypy", "build", "httpx"]
 
 [tool.setuptools]

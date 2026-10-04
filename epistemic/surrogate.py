@@ -21,24 +21,6 @@ class ResponseUncertainty:
     latent_sd: float
     noise_sd: float
     interval: tuple[float, float]
-    source: str = "gaussian_process"
-
-
-@dataclass
-class ModelUncertainty:
-    """Assumptions, fit diagnostics and alternative explanations for misfit."""
-
-    assumptions: tuple[str, ...] = (
-        "a smooth Matern-5/2 response over scaled parameters",
-        "additive, roughly constant-variance observation noise",
-        "the measured candidate set is representative of the reachable space",
-    )
-    observations: int = 0
-    residual_rmse: float | None = None
-    interval_coverage: float | None = None
-    candidate_explanations: tuple[str, ...] = ()
-    note: str = ("Large residuals are a prompt to check execution, noise and model form; on their own they "
-                 "do not establish a mechanism or a model failure.")
 
 
 @dataclass(frozen=True)
@@ -55,9 +37,6 @@ class Surrogate:
     _mean: np.ndarray = field(default_factory=lambda: np.zeros(0))
     _sd: np.ndarray = field(default_factory=lambda: np.zeros(0))
     _noise: float = 0.0
-    residuals: list[float] = field(default_factory=list)
-    covered: list[bool] = field(default_factory=list)
-    observations: int = 0
     priors: list[NumericalPrior] = field(default_factory=list)
     gates: dict[str, tuple[float, float]] = field(default_factory=dict)
 
@@ -93,7 +72,6 @@ class Surrogate:
 
     def fit(self, history: list[tuple[str, float]]) -> "Surrogate":
         """Refit the residual GP and prior gates from the current observations."""
-        self.observations = len(history)
         grid = self.task.encode(self.task.X)
         if not history:
             self._mean = np.zeros(len(grid))
@@ -148,11 +126,6 @@ class Surrogate:
         self._sd = np.sqrt(np.maximum((np.asarray(sd) * scale) ** 2 - self._noise ** 2, 0.0))
         return self
 
-    def note_outcome(self, prediction: ResponseUncertainty, observed: float) -> None:
-        """Score the prediction made before the experiment against what came back."""
-        self.residuals.append(float(observed - prediction.mean))
-        self.covered.append(bool(prediction.interval[0] <= observed <= prediction.interval[1]))
-
     def response(self, candidate_id: str) -> ResponseUncertainty:
         i = self.task.ids().index(candidate_id)
         latent = float(self._sd[i])
@@ -161,27 +134,17 @@ class Surrogate:
         return ResponseUncertainty(candidate_id, mean, latent, self._noise,
                                    (mean - 1.96 * total, mean + 1.96 * total))
 
-    def model_uncertainty(self) -> ModelUncertainty:
-        rmse = float(np.sqrt(np.mean(np.square(self.residuals)))) if self.residuals else None
-        coverage = float(np.mean(self.covered)) if self.covered else None
-        explanations = () if rmse is None else (
-            "simulated observation noise",
-            "execution differing from the intended condition",
-            "a response sharper than the fitted smoothness",
-        )
-        return ModelUncertainty(observations=self.observations, residual_rmse=rmse,
-                                interval_coverage=coverage, candidate_explanations=explanations)
-
     def ranked(self, best: float | None, exclude: set[str] | None = None, top: int = 8) -> list[tuple[str, float]]:
-        """Expected improvement over all candidates, highest first."""
+        """Rank candidates by EI using the total predictive SD."""
         sign = 1.0 if self.task.direction == "maximize" else -1.0
         reference = best if best is not None else sign * -np.inf
+        spread = np.hypot(self._sd, self._noise)
         if not np.isfinite(reference):
-            scores = self._sd.copy()
+            scores = spread.copy()
         else:
             improvement = sign * (self._mean - reference) - 0.01
-            z = improvement / np.maximum(self._sd, 1e-12)
-            scores = improvement * norm.cdf(z) + self._sd * norm.pdf(z)
+            z = improvement / np.maximum(spread, 1e-12)
+            scores = improvement * norm.cdf(z) + spread * norm.pdf(z)
         order = np.argsort(-scores)
         ids = self.task.ids()
         chosen = [(ids[i], float(scores[i])) for i in order if ids[i] not in (exclude or set())]

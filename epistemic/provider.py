@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from dataclasses import dataclass
@@ -15,22 +14,19 @@ class Provider:
     model: str
     base_url: str = ""
     temperature: float = 0.0
-    seed: int | None = None
-    prompt_version: str = "v2"
     calls: int = 0
     tokens: int = 0
     latency_s: float = 0.0
-    model_revision: str = "unspecified"
-    inference_stack: str = "unspecified OpenAI-compatible server"
-    seed_supported: bool = False
     deadline: float | None = None
     token_limit: int | None = None
 
     def metadata(self) -> dict[str, Any]:
-        return {"provider": self.name, "model": self.model, "base_url": self.base_url,
-                "temperature": self.temperature, "seed": self.seed if self.seed_supported else None,
-                "seed_supported": self.seed_supported, "prompt_version": self.prompt_version,
-                "model_revision": self.model_revision, "inference_stack": self.inference_stack}
+        return {
+            "provider": self.name,
+            "model": self.model,
+            "base_url": self.base_url,
+            "temperature": self.temperature,
+        }
 
     def complete(self, prompt: str) -> str:
         raise NotImplementedError
@@ -49,18 +45,15 @@ class Provider:
 
 @dataclass
 class MockProvider(Provider):
-    """A deterministic no-claim fixture for evidence integration tests."""
+    """A deterministic fixture for tests."""
 
     name: str = "mock"
     model: str = "mock-deterministic"
-    seed_supported: bool = True
-    model_revision: str = "sha256-v1"
-    inference_stack: str = "local deterministic Python mock"
 
     def complete(self, prompt: str) -> str:
         self.calls += 1
         self.tokens += len(prompt) // 4
-        return json.dumps({"claim_updates": []})
+        return "{}"
 
 
 @dataclass
@@ -69,10 +62,9 @@ class OpenAICompatibleProvider(Provider):
     model: str = ""
     api_key_env: str = "EPISTEMIC_API_KEY"
     max_tokens: int = 700
-    server_fingerprint: str | None = None
 
     def metadata(self) -> dict[str, Any]:
-        return super().metadata() | {"max_tokens": self.max_tokens, "server_fingerprint": self.server_fingerprint}
+        return super().metadata() | {"max_tokens": self.max_tokens}
 
     def output_token_limit(self) -> int:
         return self.max_tokens
@@ -87,8 +79,6 @@ class OpenAICompatibleProvider(Provider):
             "model": self.model, "temperature": self.temperature, "max_tokens": self.max_tokens,
             "messages": [{"role": "user", "content": prompt}],
         }
-        if self.seed is not None and self.seed_supported:
-            body["seed"] = self.seed
         self.calls += 1
         start = time.perf_counter()
         try:
@@ -101,24 +91,20 @@ class OpenAICompatibleProvider(Provider):
         finally:
             self.latency_s += time.perf_counter() - start
         self.tokens += int(payload.get("usage", {}).get("total_tokens", 0))
-        self.server_fingerprint = payload.get("system_fingerprint")
         return payload["choices"][0]["message"]["content"]
 
 
-def get_provider(spec: str = "none", seed: int | None = 0, temperature: float = 0.0) -> Provider:
+def get_provider(spec: str = "none", temperature: float = 0.0) -> Provider:
     if spec == "none":
-        return Provider(name="none", model="none")
+        return Provider(name="none", model="none", temperature=temperature)
     if spec == "mock":
-        return MockProvider(seed=seed, temperature=temperature)
+        return MockProvider(temperature=temperature)
     if spec.startswith("openai:"):
         model = spec.split(":", 1)[1] or os.environ.get("EPISTEMIC_MODEL", "")
         if not model:
             raise ValueError("Specify openai:<model> or set EPISTEMIC_MODEL.")
         return OpenAICompatibleProvider(
             model=model, base_url=os.environ.get("EPISTEMIC_BASE_URL", "https://api.openai.com/v1"),
-            seed=seed, temperature=temperature,
-            seed_supported=os.environ.get("EPISTEMIC_SEED_SUPPORTED", "false").lower() == "true",
-            model_revision=os.environ.get("EPISTEMIC_MODEL_REVISION", "unspecified"),
-            inference_stack=os.environ.get("EPISTEMIC_INFERENCE_STACK", "unspecified OpenAI-compatible server"),
+            temperature=temperature,
         )
     raise KeyError(f"Unknown provider {spec!r}; use none, mock or openai:<model>.")

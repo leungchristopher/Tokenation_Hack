@@ -12,24 +12,6 @@ from epistemic.source_filter import accessible_result, excluded_source
 URL = "https://api.amass.tech/api/v1/cores/biomedcore/records"
 
 
-def _fmt(p: dict) -> str:
-    ref = f"doi:{p['doi']}" if p.get("doi") else f"PMID:{p.get('pmid')}"
-    meta = [p.get("journal") or "?", (p.get("publicationDate") or "")[:4],
-            f"{p.get('citationCount')} citations", f"JuFo {p.get('journalQualityJufo')}"]
-    if p.get("isRetracted"):
-        meta.append("RETRACTED")
-    return f"- {p.get('title')} ({'; '.join(meta)}) {ref}\n  {(p.get('abstract') or '')[:600]}"
-
-
-async def amass_search(query: str, limit: int = 6) -> str:
-    papers = await search_records(query, limit)
-    return "\n".join(_fmt(p) for p in papers) or "No records found."
-
-
-async def search_records(query: str, limit: int = 6) -> list[dict]:
-    return (await search_result(query, limit))["records"]
-
-
 async def search_result(query: str, limit: int = 3, timeout: float = 60.0) -> dict:
     import httpx
 
@@ -40,10 +22,6 @@ async def search_result(query: str, limit: int = 3, timeout: float = 60.0) -> di
                         headers={"Authorization": f"Bearer {os.environ['AMASS_API_KEY']}"})
     r.raise_for_status()
     return accessible_result({"records": r.json()["data"], "credit_cost": r.headers.get("X-Amass-Credit-Cost")})
-
-
-async def evidence_bundle(query: str) -> dict:
-    return records_to_claims(await search_records(query), query=query)
 
 
 def _proposition(record: dict) -> str:
@@ -93,7 +71,6 @@ def records_to_claims(records: list[dict], query: str = "") -> dict:
             reference=reference, evidence=[source.id], uncertainties=uncertainties,
             discriminating_result="Run a matched-context dose or condition series with controls and replication; "
                                   "an inconsistent response challenges transfer of the reported effect.",
-            unresolved_transfer_assumptions=["Assay, organism/cell line, dose range and timing must match."],
         ))
         graph.link(source.id, claim.id, "supports", "Supports source attribution, not benchmark applicability.")
         for uncertainty_id in uncertainties:

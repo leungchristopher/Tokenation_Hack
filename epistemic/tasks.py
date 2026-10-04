@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+DRUG_NOISE_CV = 0.05
+
 DATA = Path(__file__).resolve().parent.parent / "data"
 if not DATA.is_dir():
     DATA = Path(sys.prefix) / "share" / "bo-eval" / "data"
@@ -42,7 +44,6 @@ class TaskSpec:
     provenance: str
     limitations: tuple[str, ...]
     noise: NoiseSpec
-    execution_constraints: str
 
     def __post_init__(self) -> None:
         if self.direction not in {"minimize", "maximize"}:
@@ -79,11 +80,6 @@ class TaskSpec:
         lo, hi = reference.min(0), reference.max(0)
         return (values - lo) / np.where(hi > lo, hi - lo, 1.0)
 
-    def nearest(self, params: dict[str, float]) -> str:
-        x = np.array([[float(params[name]) for name in self.names]])
-        distances = ((self.encode(self.X) - self.encode(x)) ** 2).sum(1)
-        return self.ids()[int(np.argmin(distances))]
-
     def bounds(self) -> dict[str, tuple[float, float]]:
         return {name: (float(self.candidates[name].min()), float(self.candidates[name].max())) for name in self.names}
 
@@ -102,7 +98,6 @@ class TaskSpec:
             f"Objective: {self.direction} {self.objective} [{self.outcome_unit}].\n"
             f"Parameters:\n{described}\n"
             f"{len(self.candidates)} measured candidates are selectable by candidate_id.\n"
-            f"Execution: {self.execution_constraints}\n"
             f"Observation noise: {self.noise.description}\n"
             f"Budget: {budget} experiments (repeats allowed and charged)."
         )
@@ -188,17 +183,19 @@ def load_enzyme() -> tuple[TaskSpec, Evaluator]:
                         "the underlying replicate design is undocumented here.",
             replicates=False,
         ),
-        execution_constraints="Requested settings are clipped to the measured range and snapped to the nearest measured condition.",
     )
     return task, Evaluator(task, outcomes)
 
 
-def load_drug() -> tuple[TaskSpec, Evaluator]:
+def load_drug(noise_cv: float = DRUG_NOISE_CV) -> tuple[TaskSpec, Evaluator]:
+    if not np.isfinite(noise_cv) or noise_cv < 0:
+        raise ValueError("noise_cv must be non-negative.")
     frame = pd.read_csv(DATA / "zimmer/a549_taxol_cis_dox.csv")
     names = ["taxol_uM", "cisplatin_uM", "doxorubicin_uM"]
     if len(frame) != 512 or frame[names].duplicated().any():
         raise ValueError("Expected 512 distinct three-drug combinations.")
     candidates, outcomes = _assemble(frame, names, "survival_mean", "survival_sd")
+    outcomes["spread"] = noise_cv * outcomes["outcome"]
     task = TaskSpec(
         name="drug_a549_taxol_cis_dox",
         description="A549 lung cancer cell survival after 48 h of simultaneous taxol, cisplatin and doxorubicin",
@@ -213,18 +210,17 @@ def load_drug() -> tuple[TaskSpec, Evaluator]:
         outcome_unit="% survival",
         provenance="benchmark:drug-response; source attribution is withheld from the agent for evaluation.",
         limitations=(
-            "The table holds one value per combination with no replicates, so there is no empirical noise estimate.",
+            "The table holds one value per combination with no replicates; noise uses a configurable CV, not an empirical estimate.",
             "Single-agent and vehicle controls are not included here, so no synergy objective is defined and "
             "low combination survival must not be reported as synergy.",
             "Only the three-drug column is used; the dataset's lower-order combination columns are not loaded.",
         ),
         noise=NoiseSpec(
-            kind="simulated_from_neighbour_estimate",
-            description="Simulated measurement noise with a constant standard deviation estimated from grid-neighbour "
-                        "residuals. This is not a measured replicate spread.",
+            kind="relative_cv",
+            description=f"Simulated measurement noise with standard deviation {noise_cv:.0%} of the recorded survival. "
+                        "The dataset has no replicates; this CV is a modelling choice, not an empirical estimate.",
             replicates=False,
         ),
-        execution_constraints="Doses are clipped to the measured 0.0137-20 uM range and snapped to the nearest measured combination.",
     )
     return task, Evaluator(
         task, outcomes,
@@ -236,7 +232,11 @@ def load_drug() -> tuple[TaskSpec, Evaluator]:
 TASKS = {"enzyme": load_enzyme, "drug": load_drug}
 
 
-def load_task(name: str) -> tuple[TaskSpec, Evaluator]:
+def load_task(name: str, noise_cv: float | None = None) -> tuple[TaskSpec, Evaluator]:
     if name not in TASKS:
         raise KeyError(f"Unknown task {name!r}; available: {sorted(TASKS)}")
+    if noise_cv is not None:
+        if name != "drug":
+            raise ValueError("noise_cv can only be configured for the drug task.")
+        return load_drug(noise_cv)
     return TASKS[name]()

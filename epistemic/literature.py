@@ -11,8 +11,14 @@ from typing import Annotated, Any, Callable
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
-from epistemic.evidence import ingest_literature
-from epistemic.graph import Claim, EvidenceGraph, UncertaintyKind, UncertaintyRecord
+from epistemic.graph import (
+    Assumption,
+    Claim,
+    EvidenceGraph,
+    EvidenceRecord,
+    UncertaintyKind,
+    UncertaintyRecord,
+)
 from epistemic.provider import Provider
 from epistemic.source_filter import accessible_result, excluded_source
 from epistemic.surrogate import NumericalPrior
@@ -25,6 +31,113 @@ def _trim(limit: int):
 
 Text300 = Annotated[str, _trim(300), Field(min_length=1)]
 Text200 = Annotated[str, _trim(200), Field(min_length=1)]
+
+
+def seed_graph(task: TaskSpec) -> EvidenceGraph:
+    graph = EvidenceGraph()
+    graph.add_evidence(EvidenceRecord(
+        id="E0", title=f"{task.name} dataset contract", reference=task.provenance, source="dataset",
+        metadata={"candidates": len(task.candidates), "limitations": task.limitations},
+    ))
+    graph.add_assumption(Assumption(
+        id="A0", statement=task.noise.description, scope=f"observation noise for {task.name}",
+    ))
+    graph.add_assumption(Assumption(
+        id="A_gp",
+        statement="A stationary Matérn GP with fitted Gaussian noise is used in scaled coordinates; "
+                  "small-sample fits may not be calibrated.",
+        scope=f"numerical model for {task.name}",
+    ))
+    return graph
+
+
+def ingest_literature(
+    graph: EvidenceGraph, payload: dict, prefix: str = "", limit: int | None = None,
+) -> tuple[list[dict], list[dict]]:
+    if not isinstance(payload, dict):
+        raise TypeError("Literature must be a graph dictionary.")
+    clean = accessible_result(payload)
+    if any(clean.get(key) for key in ("observations", "decisions", "assumptions")):
+        raise ValueError("Literature bundles cannot contain experiments or decisions.")
+    records = clean.get("evidence_records", {})
+    uncertainties = clean.get("uncertainties", {})
+    claims = clean.get("claims", {})
+    uncertainties = {
+        record_id: record for record_id, record in uncertainties.items()
+        if set(record.get("evidence", ())) <= set(records)
+    }
+    claims = {
+        record_id: record for record_id, record in claims.items()
+        if set(record.get("evidence", ())) <= set(records)
+        and set(record.get("uncertainties", ())) <= set(uncertainties)
+        and not excluded_source(record)
+    }
+    retained = set(records) | set(uncertainties) | set(claims)
+    clean = {
+        "observations": {},
+        "evidence_records": records,
+        "uncertainties": uncertainties,
+        "claims": claims,
+        "assumptions": {},
+        "decisions": {},
+        "edges": [
+            edge for edge in clean.get("edges", [])
+            if edge.get("source") in retained and edge.get("target") in retained
+            and not excluded_source(edge)
+        ],
+    }
+    incoming = EvidenceGraph.model_validate(clean)
+    known = {claim.reference: claim.id for claim in graph.claims.values() if claim.reference}
+    added, duplicates, selected = [], [], []
+    for claim in list(incoming.claims.values())[:limit]:
+        if claim.source != "literature":
+            raise ValueError("Only literature claims may be ingested.")
+        if claim.reference in known:
+            duplicates.append({"reference": claim.reference, "existing_claim_id": known[claim.reference]})
+        else:
+            selected.append(claim)
+            known[claim.reference] = f"L{prefix}_{len(selected)}" if prefix else claim.id
+    uncertainty_ids = {record_id for claim in selected for record_id in claim.uncertainties}
+    evidence_ids = {record_id for claim in selected for record_id in claim.evidence}
+    evidence_ids.update(
+        record_id for uncertainty in incoming.uncertainties.values() if uncertainty.id in uncertainty_ids
+        for record_id in uncertainty.evidence
+    )
+    mapping = {
+        claim.id: f"L{prefix}_{index}" if prefix else claim.id
+        for index, claim in enumerate(selected, 1)
+    }
+    for label, table, selected_ids in (
+        ("E", incoming.evidence_records, evidence_ids),
+        ("U", incoming.uncertainties, uncertainty_ids),
+    ):
+        mapping.update({
+            record_id: f"{label}{prefix}_{index}" if prefix else record_id
+            for index, record_id in enumerate((key for key in table if key in selected_ids), 1)
+        })
+    if any(record_id in graph for record_id in mapping.values()):
+        raise ValueError("Imported record ID already exists.")
+    for record_id, evidence in incoming.evidence_records.items():
+        if record_id in evidence_ids:
+            graph.add_evidence(evidence.model_copy(update={"id": mapping[record_id]}))
+    for record_id, uncertainty in incoming.uncertainties.items():
+        if record_id in uncertainty_ids:
+            graph.add_uncertainty(uncertainty.model_copy(update={
+                "id": mapping[record_id],
+                "evidence": tuple(mapping[item] for item in uncertainty.evidence),
+            }))
+    for claim in selected:
+        imported = claim.model_copy(update={
+            "id": mapping[claim.id],
+            "evidence": [mapping[item] for item in claim.evidence],
+            "uncertainties": [mapping[item] for item in claim.uncertainties],
+        })
+        graph.add_claim(imported)
+        added.append(imported.model_dump(mode="json"))
+    for edge in incoming.edges:
+        if edge.source in mapping and edge.target in mapping:
+            graph.link(mapping[edge.source], mapping[edge.target], edge.kind, edge.note)
+    return added, duplicates
 
 
 class Belief(BaseModel):
@@ -115,7 +228,6 @@ def initialise_literature_priors(
     setup = LiteratureSetup()
     if provider.name == "none" or max_searches <= 0:
         return setup
-    provider.prompt_version = "v6-gated-literature"
     hypothesis_prompt = HYPOTHESIS_PROMPT.format(
         briefing=task.briefing(experiment_cap), bounds=json.dumps(task.bounds())
     )
@@ -159,9 +271,7 @@ def initialise_literature_priors(
                     bundle = records_to_claims(result["records"], query=hypothesis.query)
                 else:
                     bundle = result
-            added, duplicates = ingest_literature(
-                graph, bundle, prefix=f"P{index + 1}", query=hypothesis.query, limit=3
-            )
+            added, duplicates = ingest_literature(graph, bundle, prefix=f"P{index + 1}", limit=3)
             ids = sorted({record_id for claim in added for record_id in claim["evidence"]})
             ids = sorted(set(ids) | {
                 record_id for duplicate in duplicates
@@ -232,7 +342,6 @@ def initialise_literature_priors(
             id=claim_id, statement=hypothesis.statement, scope=hypothesis.scope,
             source="model_conjecture", evidence=cited, uncertainties=uncertainty_ids,
             discriminating_result=hypothesis.discriminating_result,
-            unresolved_transfer_assumptions=["The retrieved system must transfer to this task."],
             belief=numerical_belief, trust=calibration.trust, trust_reason=calibration.reason,
         ))
         for evidence_id in cited:

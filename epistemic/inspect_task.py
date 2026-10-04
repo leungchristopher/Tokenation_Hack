@@ -3,7 +3,6 @@
 import asyncio
 import os
 import time
-from importlib.metadata import version
 
 from inspect_ai import Task, task
 from inspect_ai.dataset import Sample
@@ -21,16 +20,15 @@ from epistemic.tasks import load_task
 @task
 def experimental_design(
     task_name: str = "drug", budget: int = 1000, seed: int = 0,
-    provider: str = "none", execution: str = "perfect", graph_dir: str = "logs/current-inspect",
-    max_searches: int = 0, evidence_file: str | None = None,
+    provider: str = "none", graph_dir: str = "logs/current-inspect", max_searches: int = 0,
     max_seconds: float = 300.0, max_model_tokens: int = 12_000,
-    acquisition: str = "ei", patience: int = 30,
+    acquisition: str = "ei", patience: int = 30, noise_cv: float | None = None,
 ) -> Task:
     config = Config(task=task_name, budget=budget, max_seconds=max_seconds,
                     max_model_tokens=max_model_tokens, patience=patience, seed=seed,
-                    provider=provider, execution=execution,
-                    max_searches=max_searches, evidence_file=evidence_file, acquisition=acquisition)
-    spec, _ = load_task(task_name)
+                    provider=provider, max_searches=max_searches, acquisition=acquisition,
+                    noise_cv=noise_cv)
+    spec, _ = load_task(task_name, noise_cv=noise_cv)
 
     @solver
     def sequential_episode():
@@ -40,7 +38,7 @@ def experimental_design(
                 model = get_model()
                 loop = asyncio.get_running_loop()
                 generation = model._resolve_config(GenerateConfig(
-                    temperature=settings.temperature,
+                    temperature=0.0,
                     seed=settings.seed if os.getenv("EPISTEMIC_SEED_SUPPORTED", "").lower() == "true" else None,
                 ))
                 generation.max_tokens = generation.max_tokens or 1400
@@ -68,13 +66,9 @@ def experimental_design(
                             self.tokens += output.usage.total_tokens
                         return output.completion
 
-                backend: Provider = InspectProvider(name="inspect", model=model.name,
-                                                   temperature=settings.temperature, seed=settings.seed,
-                                                   seed_supported=os.getenv("EPISTEMIC_SEED_SUPPORTED", "").lower() == "true",
-                                                   model_revision=os.getenv("EPISTEMIC_MODEL_REVISION", "unspecified"),
-                                                   inference_stack=f"inspect_ai {version('inspect_ai')}")
+                backend: Provider = InspectProvider(name="inspect", model=model.name, temperature=0.0)
             else:
-                backend = get_provider(provider, seed=settings.seed)
+                backend = get_provider(provider)
             episode = await asyncio.to_thread(run_episode, settings, backend)
             if graph_dir:
                 export(episode, f"{graph_dir}/{task_name}-{state.sample_id}-epoch{state.epoch}")

@@ -1,8 +1,7 @@
-"""The one sequential loop: observe, update the model, update the epistemic state, select, execute, log."""
+"""Sequential GP-EI experimentation over finite candidate sets."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from collections.abc import Callable
@@ -12,15 +11,11 @@ from typing import Any
 
 import numpy as np
 
-from epistemic.evidence import ingest_literature, seed_graph
-from epistemic.execution import execution_model
-from epistemic.graph import Claim, Decision, EvidenceGraph, Observation, UncertaintyKind, UncertaintyRecord
-from epistemic.policies import EvidenceAnnotator, Proposal, select
+from epistemic.graph import Decision, EvidenceGraph, Observation, UncertaintyRecord
+from epistemic.literature import seed_graph
 from epistemic.provider import Provider, get_provider
-from epistemic.source_filter import accessible_result, excluded_source
 from epistemic.surrogate import Surrogate
 from epistemic.tasks import Evaluator, TaskSpec, load_task
-from epistemic.update import update_state
 
 
 @dataclass
@@ -31,23 +26,65 @@ class Config:
     max_model_tokens: int = 12_000
     patience: int = 30
     seed: int = 0
-    execution: str = "perfect"
     acquisition: str = "ei"
     observation_noise: bool = True
-    with_evidence: bool = True
-    with_edges: bool = True
     provider: str = "none"
-    temperature: float = 0.0
-    evidence_file: str | None = None
     max_searches: int = 0
-    max_evidence_calls: int = 3
+    noise_cv: float | None = None
 
     def __post_init__(self) -> None:
-        if self.acquisition not in ("ei", "gated_ei", "random") or self.execution not in ("perfect", "perturbed"):
-            raise ValueError("Use ei/gated_ei/random acquisition and perfect/perturbed execution.")
-        if min(self.budget, self.max_seconds, self.max_model_tokens, self.patience, self.seed,
-               self.max_searches, self.max_evidence_calls, self.temperature) < 0:
-            raise ValueError("Budgets, seed and temperature must be non-negative.")
+        if self.acquisition not in ("ei", "gated_ei"):
+            raise ValueError("acquisition must be ei or gated_ei.")
+        if min(self.budget, self.max_seconds, self.max_model_tokens,
+               self.patience, self.seed, self.max_searches) < 0:
+            raise ValueError("Budgets, seed and patience must be non-negative.")
+
+
+@dataclass
+class Proposal:
+    candidate_id: str
+    rationale: str
+    claims: list[str] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
+    assumptions: list[str] = field(default_factory=list)
+    prior_gates: dict[str, tuple[float, float]] = field(default_factory=dict)
+
+
+def select(
+    task: TaskSpec, graph: EvidenceGraph, surrogate: Surrogate, rng: np.random.Generator, n_init: int = 3,
+) -> Proposal:
+    tried = {observation.candidate_id for observation in graph.observations.values()}
+    available = [candidate_id for candidate_id in task.ids() if candidate_id not in tried] or task.ids()
+    assumptions: list[str] = [
+        record_id for record_id in ("A_gp", "A0") if record_id in graph.assumptions
+    ]
+    if len(graph.observations) < n_init:
+        return Proposal(
+            available[int(rng.integers(len(available)))],
+            "Initial measured-candidate design.",
+            assumptions=assumptions,
+        )
+    shown = [
+        observation.value_shown for observation in graph.observations.values()
+        if observation.value_shown is not None
+    ]
+    best = (max if task.direction == "maximize" else min)(shown) if shown else None
+    ranked = surrogate.ranked(best, exclude=tried, top=1) or surrogate.ranked(best, top=1)
+    candidate_id, score = ranked[0]
+    gates = ", ".join(
+        f"{prior_id} {mean:.2f}±{sd:.2f}" for prior_id, (mean, sd) in surrogate.gates.items()
+    )
+    rationale = f"Highest expected improvement ({score:.5g}) under the fitted GP; not proof of optimality."
+    if gates:
+        rationale += f" Learned literature gates: {gates}."
+    claims = [prior.id for prior in surrogate.priors if prior.id in graph.claims]
+    evidence = list(dict.fromkeys(
+        evidence_id for claim_id in claims for evidence_id in graph.claims[claim_id].evidence
+    ))
+    return Proposal(
+        candidate_id, rationale, claims=claims, evidence=evidence, assumptions=assumptions,
+        prior_gates=dict(surrogate.gates),
+    )
 
 
 @dataclass
@@ -64,25 +101,23 @@ class Episode:
     elapsed_s: float = 0.0
     initial_evidence: dict[str, Any] = field(default_factory=dict)
 
-    @property
-    def decisions(self) -> list[Decision]:
-        return sorted(self.graph.decisions.values(), key=lambda d: d.round)
-
-    def best_true(self) -> float | None:
-        values = [step["true_value"] for step in self.hidden]
-        if not values:
-            return None
-        return max(values) if self.task.direction == "maximize" else min(values)
-
     def final_selection(self) -> str | None:
         result = self.final_result()
         return result["candidate_id"] if result else None
 
     def final_result(self) -> dict[str, Any] | None:
-        shown = [o for o in self.graph.observations.values() if o.value_shown is not None]
+        shown = sorted(
+            (observation for observation in self.graph.observations.values()
+             if observation.value_shown is not None),
+            key=lambda observation: observation.round,
+        )
         if not shown:
             return None
-        pick = (max if self.task.direction == "maximize" else min)(shown, key=lambda o: float(o.value_shown or 0.0))
+        pick = (max if self.task.direction == "maximize" else min)(
+            shown, key=lambda observation: (
+                observation.value_shown if observation.value_shown is not None else 0.0
+            ),
+        )
         return {
             "candidate_id": pick.candidate_id,
             "observation_id": pick.id,
@@ -91,11 +126,10 @@ class Episode:
             "rule": f"Greedy {self.task.direction} over observed results; ties keep the earliest experiment.",
             "uncertainty": (
                 "Best observed, not a proven optimum. Observation noise can misrank candidates; "
-                "execution may differ from intended settings. No hidden dataset means or GP forecasts "
-                "are used for final selection."
+                "predictions do not determine final selection."
             ),
             "uncertainty_records": [
-                u.id for u in self.graph.uncertainties.values() if pick.id in u.evidence
+                record.id for record in self.graph.uncertainties.values() if pick.id in record.evidence
             ],
         }
 
@@ -110,33 +144,40 @@ class Episode:
                 handle.write(json.dumps(step) + "\n")
         (out / "graph.json").write_text(self.graph.model_dump_json(indent=2))
         (out / "final.json").write_text(json.dumps(self.final_result(), indent=2))
-        (out / "config.json").write_text(json.dumps({**asdict(self.config), "provider": self.provider_metadata}, indent=2))
+        (out / "config.json").write_text(json.dumps(
+            {**asdict(self.config), "provider": self.provider_metadata}, indent=2,
+        ))
         (out / "termination.json").write_text(json.dumps({
-            "reason": self.stop_reason, "elapsed_s": self.elapsed_s,
-            "experiments": len(self.hidden), "model_tokens": self.provider_metadata.get("tokens", 0),
+            "reason": self.stop_reason,
+            "elapsed_s": self.elapsed_s,
+            "experiments": len(self.hidden),
+            "model_tokens": self.provider_metadata.get("tokens", 0),
         }, indent=2))
         (out / "literature_setup.json").write_text(json.dumps(self.initial_evidence, indent=2))
         (out / "hidden_provenance.json").write_text(json.dumps({"source": self.evaluator_provenance}, indent=2))
         return out
 
 
-def run_episode(config: Config, provider: Provider | None = None,
-                initial: list[str] | None = None, literature_search: Callable[[str], dict] | None = None,
-                domain: tuple[TaskSpec, Evaluator] | None = None) -> Episode:
-    task, evaluator = domain or load_task(config.task)
-    provider = provider or get_provider(config.provider, seed=config.seed, temperature=config.temperature)
+def run_episode(
+    config: Config,
+    provider: Provider | None = None,
+    literature_search: Callable[[str], dict] | None = None,
+    domain: tuple[TaskSpec, Evaluator] | None = None,
+) -> Episode:
+    task, evaluator = domain or load_task(config.task, noise_cv=config.noise_cv)
+    provider = provider or get_provider(config.provider)
     started = time.perf_counter()
     provider.deadline = started + config.max_seconds
     provider.token_limit = config.max_model_tokens
-    graph = seed_graph(task, evidence_file=config.evidence_file if config.with_evidence else None)
-    literature_setup: dict[str, Any] = {}
+    graph = seed_graph(task)
     priors = []
     setup_limit = None
-    if config.acquisition == "gated_ei" and config.with_evidence:
+    literature_setup: dict[str, Any] = {}
+    if config.acquisition == "gated_ei":
         from epistemic.literature import initialise_literature_priors
+
         setup = initialise_literature_priors(
-            task, graph, provider, config.max_searches, literature_search,
-            experiment_cap=config.budget,
+            task, graph, provider, config.max_searches, literature_search, experiment_cap=config.budget,
         )
         priors = setup.priors
         setup_limit = setup.limit_reason
@@ -146,22 +187,18 @@ def run_episode(config: Config, provider: Provider | None = None,
             "failures": setup.failures,
             "limit_reason": setup.limit_reason,
         }
-    annotator = EvidenceAnnotator(task, provider, config.budget, config.max_searches,
-                                 0 if config.acquisition == "gated_ei" else config.max_evidence_calls,
-                                 config.with_edges)
-    episode = Episode(config, task, graph, provider_metadata=provider.metadata(),
-                      evaluator_provenance=evaluator.provenance, evaluator=evaluator,
-                      initial_evidence=literature_setup)
+    episode = Episode(
+        config, task, graph, provider_metadata=provider.metadata(),
+        evaluator_provenance=evaluator.provenance, evaluator=evaluator, initial_evidence=literature_setup,
+    )
     if setup_limit:
         episode.stop_reason = setup_limit
-    executor = execution_model(task, config.execution)
     surrogate = Surrogate(task, seed=config.seed).with_priors(priors).fit([])
     rng = np.random.default_rng(np.random.SeedSequence([config.seed, 0]))
-    rounds = config.budget
-    searches = 0
     best_observed: float | None = None
     last_improvement: int | None = None
-    for round in range(1, rounds + 1):
+
+    for round_index in range(1, config.budget + 1):
         if episode.stop_reason != "not_started":
             break
         if time.perf_counter() >= provider.deadline:
@@ -171,177 +208,106 @@ def run_episode(config: Config, provider: Provider | None = None,
             episode.stop_reason = "model_token_limit"
             break
         if (config.patience and last_improvement is not None
-                and round - 1 - last_improvement >= config.patience):
+                and round_index - 1 - last_improvement >= config.patience):
             episode.stop_reason = "stagnation"
             break
-        history = [(o.candidate_id, o.value_shown) for o in graph.observations.values() if o.value_shown is not None]
-        forced = initial[round - 1] if initial and round <= len(initial) else None
-        proposal = (Proposal(forced, rationale="Matched initial experiment.") if forced
-                    else select(task, graph, surrogate, rng, config.acquisition))
-        if config.with_evidence and provider.name != "none":
-            annotator.annotate(proposal, graph, surrogate, round)
-            if annotator.limit_reason:
-                episode.stop_reason = annotator.limit_reason
-                break
+
+        proposal = select(task, graph, surrogate, rng)
+        history = [
+            (observation.candidate_id, observation.value_shown)
+            for observation in graph.observations.values()
+            if observation.value_shown is not None
+        ]
         prediction = surrogate.response(proposal.candidate_id) if history else None
-        state_view = graph.view(round, with_edges=config.with_edges)
-        state_view["literature_searches_remaining"] = config.max_searches - searches
-        before = {cid: len(claim.revisions) for cid, claim in graph.claims.items()}
-        for index, update in enumerate(proposal.claim_updates):
-            claim_id = update.claim_id or f"H{round}_{index}"
-            if update.claim_id:
-                graph.revise(claim_id, round, update.status, "LLM interpretation of accessible evidence",
-                             update.evidence + update.contradicting_evidence + update.qualifying_evidence
-                             + update.non_transferable_evidence, update.statement,
-                             update.scope, update.discriminating_result)
-            else:
-                uncertainty_ids = []
-                categories: tuple[UncertaintyKind, ...] = ("source", "transfer", "mechanistic")
-                for category in categories:
-                    item = graph.add_uncertainty(UncertaintyRecord(
-                        id=f"U_{claim_id}_{category}", category=category,
-                        statement=f"{category.capitalize()} uncertainty has not been resolved by this interpretation.",
-                        scope=update.scope, evidence=tuple(update.evidence), round=round,
-                    ))
-                    uncertainty_ids.append(item.id)
-                graph.add_claim(Claim(id=claim_id, statement=update.statement, scope=update.scope,
-                                      source="model_conjecture", evidence=update.evidence,
-                                      status=update.status, uncertainties=uncertainty_ids,
-                                      discriminating_result=update.discriminating_result), round=round)
-                for uncertainty_id in uncertainty_ids:
-                    graph.link(uncertainty_id, claim_id, "qualifies")
-            for ref in update.evidence:
-                graph.link(ref, claim_id, "supports", "LLM interpretation; not a measured fact")
-            for ref in update.contradicting_evidence:
-                graph.link(ref, claim_id, "contradicts", "LLM interpretation; not causal attribution")
-            for ref in update.qualifying_evidence:
-                graph.link(ref, claim_id, "qualifies", "Interpretation narrows, but does not refute, the claim.")
-            for ref in update.non_transferable_evidence:
-                graph.link(ref, claim_id, "not_transferable", "Interpretation rejects the proposed context transfer.")
         decision = graph.add_decision(Decision(
-            id=f"D{round}", round=round, candidate_id=proposal.candidate_id,
-            claims=[e for e in proposal.evidence if e in graph.claims],
+            id=f"D{round_index}",
+            round=round_index,
+            candidate_id=proposal.candidate_id,
+            claims=proposal.claims,
             evidence=proposal.evidence,
-            assumptions=proposal.assumptions or [e for e in proposal.evidence if e in graph.assumptions],
-            targeted_uncertainty="response",
+            assumptions=proposal.assumptions,
             justification=proposal.rationale,
-            prediction=proposal.prediction if proposal.prediction is not None else
-            (prediction.mean if prediction else None),
-            prediction_source="numerical_model" if prediction is not None else "unavailable",
-            search_query=proposal.search_query,
-            implications="Outside the interval, execution, noise and model form are all candidate explanations.",
-            policy="gated_gp_bo" if surrogate.priors else "gp_bo",
+            prediction=prediction.mean if prediction else None,
+            prediction_source="numerical_model" if prediction else "unavailable",
             prior_gates=proposal.prior_gates,
         ))
         for claim_id in decision.claims:
             gate = surrogate.gates.get(claim_id)
-            note = (f"gate {gate[0]:.2f} ± {gate[1]:.2f}; initial trust "
-                    f"{graph.claims[claim_id].trust:.2f}") if gate and graph.claims[claim_id].trust is not None else (
-                    "Declared evidence dependency."
+            initial_trust = graph.claims[claim_id].trust
+            note = (
+                f"gate {gate[0]:.2f} ± {gate[1]:.2f}; initial trust {initial_trust:.2f}"
+                if gate and initial_trust is not None else "Literature prior used by the GP."
             )
             graph.link(decision.id, claim_id, "depends_on", note)
-        for assumption_id in decision.assumptions:
-            graph.link(decision.id, assumption_id, "depends_on")
-        for evidence_id in decision.evidence:
-            if evidence_id not in decision.claims and evidence_id not in decision.assumptions:
-                graph.link(decision.id, evidence_id, "depends_on", "Accessible evidence used in this decision.")
+        for record_id in [*decision.evidence, *decision.assumptions]:
+            graph.link(decision.id, record_id, "depends_on")
 
-        record = executor.run(proposal.candidate_id, np.random.default_rng(np.random.SeedSequence([config.seed, round, 1])))
-        true_value = evaluator.truth(record.realised_id)
-        shown = (evaluator.observe(record.realised_id, np.random.default_rng(np.random.SeedSequence([config.seed, round, 2])))
-                 if config.observation_noise else true_value)
-
+        candidate_id = proposal.candidate_id
+        true_value = evaluator.truth(candidate_id)
+        shown = (
+            evaluator.observe(candidate_id, np.random.default_rng(
+                np.random.SeedSequence([config.seed, round_index, 2]),
+            ))
+            if config.observation_noise else true_value
+        )
         observation = graph.add_observation(Observation(
-            id=f"O{round}", round=round, candidate_id=proposal.candidate_id,
-            intended_params=record.intended_params, execution=record.accessible(),
+            id=f"O{round_index}",
+            round=round_index,
+            candidate_id=candidate_id,
+            intended_params=task.params_of(candidate_id),
             value_shown=shown,
-            outcome_unit=task.outcome_unit, simulated=True, measurement_noise=config.observation_noise,
+            outcome_unit=task.outcome_unit,
+            simulated=True,
+            measurement_noise=config.observation_noise,
         ))
         graph.link(decision.id, observation.id, "tests", "the experiment this decision ran")
-        if shown is not None:
-            improved = (best_observed is None
-                        or (shown > best_observed if task.direction == "maximize" else shown < best_observed))
-            if improved:
-                best_observed = shown
-                last_improvement = round
-            if prediction is not None:
-                surrogate.note_outcome(prediction, shown)
-            surrogate.fit([(o.candidate_id, o.value_shown) for o in graph.observations.values()
-                           if o.value_shown is not None])
-            update_state(graph, task, observation, prediction, round)
+        uncertainty = graph.add_uncertainty(UncertaintyRecord(
+            id=f"U_O{round_index}",
+            category="response",
+            statement=(task.noise.description if config.observation_noise
+                       else "Measurement noise was disabled for this observation."),
+            scope=task.name,
+            evidence=(observation.id,),
+            round=round_index,
+        ))
+        graph.link(uncertainty.id, observation.id, "qualifies")
 
-        retrieval: dict[str, Any] | None = None
-        if proposal.search_query:
-            retrieval = {"query": proposal.search_query, "status": "budget_exhausted"}
-            if searches < config.max_searches and round < rounds:
-                searches += 1
-                annotator.searches_remaining = config.max_searches - searches
-                start = time.perf_counter()
-                try:
-                    if excluded_source(proposal.search_query):
-                        raise ValueError("This source is excluded from evaluation evidence.")
-                    if literature_search is None:
-                        from epistemic.amass import records_to_claims, search_result
-                        result = asyncio.run(search_result(proposal.search_query, limit=3))
-                        bundle = records_to_claims(result["records"], query=proposal.search_query)
-                    else:
-                        result = accessible_result(literature_search(proposal.search_query))
-                        bundle = result
-                    added, duplicates = ingest_literature(
-                        graph, bundle, round=round, prefix=f"{round}_{searches}", query=proposal.search_query, limit=3,
-                    )
-                    retrieval.update(
-                        status="success",
-                        claims=added,
-                        duplicate_sources=duplicates,
-                        tool_result=result,
-                    )
-                except Exception as error:
-                    retrieval.update(status="failed", error_type=type(error).__name__,
-                                     http_status=getattr(getattr(error, "response", None), "status_code", None))
-                retrieval["latency_s"] = time.perf_counter() - start
-            elif round == rounds:
-                retrieval["status"] = "no_future_round"
-
+        improved = (
+            best_observed is None
+            or (shown > best_observed if task.direction == "maximize" else shown < best_observed)
+        )
+        if improved:
+            best_observed = shown
+            last_improvement = round_index
+        surrogate.fit([
+            (item.candidate_id, item.value_shown) for item in graph.observations.values()
+            if item.value_shown is not None
+        ])
         episode.trajectory.append({
-            "round": round,
-            "state_available_to_agent": state_view,
-            "prompt": annotator.last_prompt,
-            "action": decision.model_dump(),
-            "epistemic_interpretations": [u.model_dump() for u in proposal.claim_updates],
-            "literature_search": retrieval,
+            "round": round_index,
+            "action": decision.model_dump(mode="json"),
             "pre_experiment_prediction": None if prediction is None else {
-                "mean": prediction.mean, "latent_sd": prediction.latent_sd,
-                "noise_sd": prediction.noise_sd, "interval": list(prediction.interval)},
-            "accessible_observation": {**observation.model_dump(),
-                                       "value_shown": shown},
-            "state_revision": {
-                "new_revisions": {cid: len(c.revisions) - before.get(cid, 0)
-                                  for cid, c in graph.claims.items() if len(c.revisions) != before.get(cid, 0)},
-                "contradictions": len(graph.contradictions()),
-                "model_uncertainty": asdict(surrogate.model_uncertainty()),
+                "mean": prediction.mean,
+                "latent_sd": prediction.latent_sd,
+                "noise_sd": prediction.noise_sd,
+                "interval": list(prediction.interval),
             },
-            "evidence_annotation": {"valid": proposal.evidence_valid, "failures": proposal.failures},
+            "accessible_observation": observation.model_dump(mode="json"),
         })
         episode.hidden.append({
-            "round": round, "intended_id": record.intended_id, "realised_id": record.realised_id,
-            "realised_params": record.realised_params, "true_value": true_value,
-            "clipped_continuous_params": record.continuous_params or record.realised_params,
+            "round": round_index,
+            "candidate_id": candidate_id,
+            "true_value": true_value,
             "measured_value": shown,
-            "regret": evaluator.regret(record.realised_id),
-            "execution_mapping_changed": record.realised_id != record.intended_id,
+            "regret": evaluator.regret(candidate_id),
         })
     else:
         episode.stop_reason = "experiment_limit"
-    episode.elapsed_s = round_latency_value(time.perf_counter() - started)
+
+    episode.elapsed_s = round(time.perf_counter() - started, 3)
     episode.provider_metadata = provider.metadata() | {
-        "calls": provider.calls, "tokens": provider.tokens, "latency_s": round_latency(provider)}
+        "calls": provider.calls,
+        "tokens": provider.tokens,
+        "latency_s": round(provider.latency_s, 3),
+    }
     return episode
-
-
-def round_latency(provider: Provider) -> float:
-    return round(provider.latency_s, 3)
-
-
-def round_latency_value(value: float) -> float:
-    return round(value, 3)
