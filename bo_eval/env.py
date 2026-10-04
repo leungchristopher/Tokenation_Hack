@@ -68,14 +68,14 @@ class TabularEnv:
         )
 
     @classmethod
-    def from_csv(cls, name: str, file: str, description: str, mean_col: str, sd_col: str, params=None):
+    def from_csv(cls, name: str, file: str, description: str, mean_col: str, sd_col: str, params=None, goal: str = "maximize"):
         """Load a CSV of measured conditions; duplicate conditions are pooled."""
         df = pd.read_csv(DATA / file)
         params = params or [c for c in df.columns if c not in (mean_col, sd_col, "n")]
         df["_var"] = df[sd_col] ** 2
         df = df.groupby(params, as_index=False)[[mean_col, "_var"]].mean()
         df[sd_col] = np.sqrt(df.pop("_var"))
-        return cls(name, description, df, params, mean_col, sd_col)
+        return cls(name, description, df, params, mean_col, sd_col, goal)
 
 
 _ICFREE = "split-GFP fluorescence yield (relative to the no-DNA control) of {} in an Echo-assembled cell-free reaction"
@@ -106,6 +106,11 @@ ENVS = {
         description="HiBiT luminescence yield of colicin M in HeLa lysate (euCFPS); concentrations are in X of the kit default",
         mean_col="yield_mean",
         sd_col="yield_sd",
+    ),
+    "zimmer_a549": dict(
+        file="zimmer/a549_taxol_cis_dox.csv",
+        description="the % survival of A549 lung cancer cells after 48 h with taxol, cisplatin and doxorubicin (doses in uM)",
+        mean_col="survival_mean", sd_col="survival_sd", goal="minimize",
     ),
 }
 
