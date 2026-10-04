@@ -50,11 +50,21 @@ class RenderedLab(Lab):
             self.renderer.close()
 
 
+def modes(a):
+    """--model alone keeps the original Inspect LLM + Amass mode; --llm modal needs no Amass key."""
+    return a.llm or ('inspect' if a.model else False), a.literature or (bool(a.model) and a.llm is None)
+
+
+def mode(a):
+    llm, literature = modes(a)
+    return 'BO'+' + Amass'*literature+{'inspect': ' + LLM', 'modal': ' + Modal LLM'}.get(llm, '')
+
+
 class Demo:
     def __init__(self, args):
         self.args, self.lock, self.frame = args, threading.Lock(), b''
         self.state = dict(status='ready', phase='ready', graph=None, revision=0, frame_id=0,
-                          budget=args.budget, mode='BO + Amass + LLM' if args.model else 'BO', cv=args.cv)
+                          budget=args.budget, mode=mode(args), cv=args.cv)
 
     def publish(self, **update):
         with self.lock:
@@ -87,10 +97,11 @@ class Demo:
         a = self.args
         out = Path(a.out)/uuid4().hex[:10]
         try:
-            if a.model and not os.getenv('AMASS_API_KEY'):
+            llm, literature = modes(a)
+            if literature and not os.getenv('AMASS_API_KEY'):
                 raise ValueError('AMASS_API_KEY is required for literature mode.')
             task = Task(dataset=[Sample(id=f'seed-{a.seed}', input='Optimise the simulated assay.')],
-                        solver=demo_solver(a.budget, a.seed, bool(a.model), bool(a.model), a.cv, str(out),
+                        solver=demo_solver(a.budget, a.seed, literature, llm, a.cv, str(out),
                             on_event=self.event, lab_factory=lambda *args, **kwargs:
                                 RenderedLab(*args, publish=self.publish, **kwargs)), scorer=demo_scorer())
             log = eval(task, model=a.model or 'mockllm/model', display='none', ctl_server=False,
@@ -150,11 +161,17 @@ def main():
     parser.add_argument('--budget', type=int, default=6)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--cv', type=float, default=0.15)
-    parser.add_argument('--model', help='Inspect model ID; enables LLM selection and Amass research')
+    parser.add_argument('--model', help='Inspect model ID; alone, enables LLM selection and Amass research')
+    parser.add_argument('--llm', choices=('inspect', 'modal'), help='Chooser provider (modal: Gemma 4 on Modal)')
+    parser.add_argument('--literature', action='store_true', help='Amass research; requires --llm or --model')
     parser.add_argument('--out', default='logs/live')
     args = parser.parse_args()
     if not 1 <= args.budget <= 24 or not 0 <= args.cv <= 1:
         parser.error('Use 1–24 experiments and a volume CV between 0 and 1.')
+    if args.llm == 'inspect' and not args.model:
+        parser.error('--llm inspect requires --model.')
+    if modes(args)[1] and not modes(args)[0]:
+        parser.error('Literature mode requires an LLM chooser so evidence can affect decisions.')
     server = serve(Demo(args), args.port)
     print(f'Open http://127.0.0.1:{server.server_port}', flush=True)
     try:
