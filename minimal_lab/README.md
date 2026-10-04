@@ -4,7 +4,7 @@ One loop, one decision record per experiment. No agent hierarchy, learned litera
 trust scores, separate memory system, or claim that a deferred branch is disproved.
 
 `loop.py` is the reusable system. It takes a finite numeric candidate matrix,
-parameter names, an experiment callable, and optional async research/choice callbacks.
+parameter names, an experiment callable, and optional async research/choice/prior callbacks.
 It has no robotics, Inspect, dataset or API imports. `lab.py` and `task.py` are adapters.
 
 ```python
@@ -15,6 +15,7 @@ episode = await run(
     candidates, parameter_names, execute,
     objective="reviewer-assessed design quality", goal="maximize", budget=12,
     research=search_evidence, choose=choose_experiment,
+    make_prior=interpret_literature, replicates=3,
 )
 save(episode, "results/run-001")  # new directory, never overwrite an earlier run
 ```
@@ -37,12 +38,15 @@ Each round:
 
 1. Fit a fixed Matern GP to observed rewards at reported inputs. Approximately propagate
    input-report uncertainty into response variance. These intervals are not calibrated.
-2. Shortlist highest expected improvement, highest predictive uncertainty and an incumbent
+2. Shortlist highest expected improvement, highest latent predictive uncertainty and an incumbent
    repeat. Previously measured conditions remain eligible. Deduplicate. The first round
-   uses three seeded random candidates.
+   uses seeded random candidates. A cited location prior adds a preferred candidate across
+   the whole domain. Its acquisition preference is bounded to 4:1 initially and decays
+   with observations; raw EI and exploration options remain eligible.
 3. Optionally let an LLM choose within this shortlist, citing sources and explaining
    every deferred alternative. Invalid responses fall back to the numerical policy.
-4. Record the decision, then execute. A result outside the pre-update 2-SD interval
+4. Record the decision, then execute. Planned replicates repeat independent preparations
+   (fresh wells in the robot adapter), consume budget individually, and keep every outcome. A result outside the pre-update 2-SD interval
    schedules a diagnostic repeat. It does not identify the cause or refute a mechanism.
 5. Search at most twice: initially and after surprise. Reserve the last attempt for
    confirmation. Return the best mean observed proxy across intended settings and repeats.
@@ -51,7 +55,12 @@ Deferral is local to a decision, not permanent pruning. A later selection links 
 to prior deferrals of that condition. Incumbent selection, final confirmation and final
 recommendation all use mean observed response. No evidence edge propagates closure.
 
-This bounds LLM influence, but it also limits literature guidance to shortlisted candidates.
+Literature can guide the shortlist through a location prior and then guide the choice.
+`evidence.py` validates cited parameter bounds and computes bounded prior weights.
+`research.py` owns AMASS retrieval and optional Inspect interpretation. The search query
+comes from the task objective/parameters or an explicit `research_query`; the core loop
+has no dependency on AMASS, Inspect or a particular assay. An unjustified prior is omitted;
+retrieval/interpretation failure is recorded and numerical search continues.
 The graph is an inspectable decision record, not proof that generated reasons are faithful
 internal explanations. Callback providers are responsible for their own request timeouts.
 
@@ -61,7 +70,7 @@ From the repository root:
 
 ```bash
 pip install -e .
-python -m inspect_ai eval minimal_lab/task.py --model mockllm/model -T budget=3
+python -m inspect_ai eval minimal_lab/task.py --model mockllm/model -T budget=6 -T replicates=2
 
 # Requires AMASS_API_KEY and credentials for the chosen Inspect model provider.
 python -m inspect_ai eval minimal_lab/task.py --model "$INSPECT_MODEL" \
@@ -99,3 +108,52 @@ This module combines the small-loop idea with upstream robotics without merging 
 agent layers. No existing solver, branch or PR is replaced.
 
 Run focused checks with `python -m pytest -q tests/test_minimal_lab.py`.
+
+## Replication and scope
+
+The demo defaults to two independent preparations per selection (`--replicates` for
+the live server, `-T replicates=` for Inspect); the reusable loop defaults to one.
+Budget counts preparations, including diagnostic and final confirmation runs. A budget
+ending mid-group is allowed in the core loop and recorded through `replication_complete`.
+Recommendations include the mean, sample SD and standard error over all valid repeats.
+These describe observed variability under an independence assumption, not systematic
+bias, biological/batch variability or confidence that the selected condition is optimal.
+For those experiments, implement the relevant batch/replicate structure in `execute`.
+
+Use `python -m minimal_lab.live --budget 12 --replicates 3` for the linked robot/graph
+demo. Add `--model YOUR_INSPECT_MODEL_ID` and credentials to enable AMASS-backed priors
+and literature-guided decisions. The older `bo_eval/task.py` is a separate legacy
+optimiser and still has its original branch-closing semantics; it is not this demo.
+
+To use another task, supply its candidates, parameter names, objective, goal and an
+execution callable to `run`. Supply research and prior callbacks if needed. The UPO
+robot recipe in `lab.py` and the benchmark scorer in `task.py` remain assay adapters;
+a different physical assay needs its own recipe and measurement implementation.
+
+## Cancer assay video
+
+The live server now defaults to `--env zimmer_a549`: taxol, cisplatin and
+ doxorubicin are dispensed into the same fresh well, topped up with culture medium,
+then mixed. Every replicate uses a fresh well. `--env upo_abts` retains the enzyme demo.
+For Inspect, select `-T env=zimmer_a549` explicitly. The objective is minimum A549
+survival, not maximum enzyme activity.
+
+Each live run writes `assay.mp4` and `assay.timeline.json` next to its Inspect logs.
+Frames come from the executing backend's MuJoCo data; overlays identify the current
+graph decision, drug, volume and well. The timeline maps action boundaries to frame
+numbers and decision IDs. Video is sampled during execution and is not a calibrated
+real-time record. Cell seeding/incubation/readout and liquid dynamics are not animated
+as if physically simulated. See `data/zimmer/README.md` for data and noise provenance.
+
+## Iterations and recording
+
+The live default is 24 preparations, including paired search replicates and a reserved
+final confirmation pair. A preparation is not an optimisation iteration: graph nodes
+record `iteration` and `phase` (proposal, replicate, diagnostic or confirmation).
+The model is updated after observations; proposals use all preceding observations.
+Recommendations report both optimisation iterations and distinct conditions.
+
+Recordings are 2560 x 1440. The robot panel is rendered at 1280 x 960 from current
+MuJoCo state, with the current decision rationale above it and the growing decision/
+observation graph alongside it. Deferred options are compacted in the video; the
+interactive graph retains complete reasons, source quotations and evidence links.

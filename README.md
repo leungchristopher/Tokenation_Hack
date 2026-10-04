@@ -1,3 +1,7 @@
+> **Connected robot + reasoning graph demo:** see [START_HERE.md](START_HERE.md) and
+> [minimal_lab documentation](minimal_lab/README.md). Run `python -m minimal_lab.live --budget 12 --replicates 3`.
+> The `bo_eval` commands below run the separate legacy optimiser, not the connected demo.
+
 # Tokenation_Hack
 
 Inspect eval for LLM-driven experimental optimisation, using a Bayesian-optimisation tool and a legible reasoning graph.

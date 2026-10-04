@@ -10,13 +10,14 @@ import numpy as np
 
 class Lab:
     def __init__(self, env, seed=0, cv=0.15, report_cv=0.05, backend=None,
-                 on_action=lambda action, detail: None):
+                 on_action=lambda action, detail: None, recipe=None):
         if not np.isfinite([cv, report_cv]).all() or min(cv, report_cv) < 0:
             raise ValueError('Volume error scales must be finite and nonnegative.')
         if backend is None:
             from harness.tools.lab_backend import LabBackend
             backend = LabBackend(seed=seed)
         self.backend, self.env = backend, env
+        self.recipe = recipe
         self.on_action = on_action
         self.cv, self.report_cv = cv, report_cv
         self.delivery_rng, self.report_rng, self.assay_rng = [np.random.default_rng(s)
@@ -26,9 +27,13 @@ class Lab:
         # Physical source slots only. Scene labels are NOT the chemical identity of a UPO assay.
         self.slots = {'salt_conc': 'nacl', 'cosubstrate_conc': 'pnpp',
                       'organic_solvent_conc': 'glycerol'}
+        if recipe is not None:
+            self.slots = recipe.slots
         self.maxima = dict(zip(env.params, env.X.max(0)))
 
     def protocol(self, params):
+        if self.recipe is not None:
+            return self.recipe.protocol(params, self.maxima, self.backend.contract)
         transfers = [dict(role=p, source=self.backend.contract.reagents[slot],
                           volume_ul=20*params[p]/self.maxima[p]) for p,slot in self.slots.items()]
         transfers += [dict(role='buffer', source=self.backend.contract.reagents['phosphate'], volume_ul=20),
@@ -44,10 +49,15 @@ class Lab:
 
     def __call__(self, params):
         plan = self.protocol(params)
-        if self.count >= len(self.backend.wells):
-            return dict(value=None, ok=False, reason='No unused wells remain.', reported=None)
-        well = self.backend.wells[self.count]
+        plate = self.count // len(self.backend.wells) + 1
+        if self.count and self.count % len(self.backend.wells) == 0:
+            # The upstream scene has fixed labware: replacement is an explicit service,
+            # not fabricated robot plate-handling motion.
+            self.on_action('replace plate (simulated service)',
+                           dict(plate=plate, simulated_service=True))
+        well = self.backend.wells[self.count % len(self.backend.wells)]
         self.count += 1
+        self.on_action("prepare", dict(well=well, params=params, assay=plan.get("assay", "UPO-ABTS")))
         motion, volumes = [], {}
         for transfer in plan['transfers']:
             self.on_action('change tip', dict(well=well, **transfer))
@@ -90,7 +100,7 @@ class Lab:
                     reported=[reported[p] for p in self.env.params],
                     report_sd=[report_sd[p] for p in self.env.params],
                     execution=dict(model='MuJoCo motion + assumed lognormal liquid-volume error',
-                                   cv=self.cv, report_cv=self.report_cv, well=well),
+                                   cv=self.cv, report_cv=self.report_cv, well=well, plate=plate),
                     protocol=plan, motion=motion,
                     uncertainty='Delivery estimates are simulated sensor reports. Grid snapping can change '
                     'several parameters in this sparse table. pH/temperature actuation is not simulated.')

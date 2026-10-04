@@ -82,7 +82,17 @@ def _upo_abts() -> TabularEnv:
     )
 
 
-ENVS = {"upo_abts": _upo_abts}
+def _zimmer_a549() -> TabularEnv:
+    return TabularEnv(
+        name="zimmer_a549",
+        description="A549 cell survival (%) with taxol, cisplatin and doxorubicin",
+        df=pd.read_csv(DATA / "zimmer/a549_taxol_cis_dox.csv"),
+        params=["taxol_uM", "cisplatin_uM", "doxorubicin_uM"],
+        mean_col="survival_mean", sd_col="survival_sd", goal="minimize",
+    )
+
+
+ENVS = {"upo_abts": _upo_abts, "zimmer_a549": _zimmer_a549}
 
 
 @cache

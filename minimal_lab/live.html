@@ -6,11 +6,11 @@
 </style>
 <header><div><h1>Inquiry / live experiment</h1><small id="status">Connecting</small></div><div><a id="download" class="button" href="/result.json" download="protocol.json">Save protocol</a> <button id="run">Run experiment loop</button></div></header>
 <div id="error" role="alert"></div>
-<section class="stats"><div class="stat"><small>Experiments completed</small><strong id="count">0</strong></div><div class="stat"><small>Best observed mean</small><strong id="best">—</strong></div><div class="stat"><small>Current stage</small><strong id="stage">Ready</strong></div></section>
+<section class="stats"><div class="stat"><small>Preparations completed</small><strong id="count">0</strong></div><div class="stat"><small>Best observed mean</small><strong id="best">—</strong></div><div class="stat"><small>Current stage</small><strong id="stage">Ready</strong></div></section>
 <main><section class="panel"><div class="bar"><h2>Robot execution</h2><small>MuJoCo · live physics</small></div><img id="robot" alt="Live robot simulation" hidden><div id="action">Start a run to watch the robot execute each selected protocol.</div><svg id="progress" aria-label="Observed assay results over experiments"></svg></section>
 <section class="panel"><div class="bar"><h2>Decision graph</h2><button id="follow">Follow live</button></div><div class="graph-scroll"><svg id="graph" role="img" aria-label="Clickable experiment decision graph"></svg></div></section>
 <section class="panel details"><div id="reason"><h2>Why this experiment?</h2><p>The decision appears before the robot moves.</p></div><div id="evidence"><h2>Evidence and uncertainty</h2><p>Selected and deferred branches retain their reasons. A deferred branch remains open to reconsideration.</p></div></section></main>
-<footer>Volume error and delivery reports are simulated, not liquid physics. Source labels denote scene slots. Best observed assay response does not verify an underlying objective. GP uncertainty is approximate.</footer>
+<footer>Volume error and delivery reports are simulated, not liquid physics. The selected assay assigns drug identities to scene source slots. Best observed assay response does not verify an underlying objective. GP uncertainty is approximate.</footer>
 <script>
 const $=id=>document.getElementById(id), NS='http://www.w3.org/2000/svg';
 let graph=null,pinned=null,revision=-1,frame=-1;
@@ -20,7 +20,7 @@ function svg(tag,attrs,parent,text){const e=document.createElementNS(NS,tag);for
 function table(parent,headers,rows){const t=el('table',null,parent),head=el('tr',null,t);headers.forEach(h=>el('th',h,head));for(const row of rows){const tr=el('tr',null,t);row.forEach(v=>el('td',v,tr))}}
 function show(id){const n=graph.nodes.find(n=>n.id===id);if(!n)return;
   const a=$('reason'),b=$('evidence');a.replaceChildren();b.replaceChildren();
-  el('h2',n.kind==='decision'?`Round ${n.round} · choose C${n.selected}`:n.kind==='observation'?`Round ${n.round} · observed ${number(n.value)}`:n.kind==='recommendation'?'Recommended protocol':n.kind==='deferred'?`C${n.candidate} · deferred`:n.title||n.kind,a);
+  el('h2',n.kind==='decision'?`Iteration ${n.iteration??n.round} · ${n.phase??"proposal"} · C${n.selected}`:n.kind==='observation'?`Round ${n.round} · observed ${number(n.value)}`:n.kind==='recommendation'?'Recommended protocol':n.kind==='deferred'?`C${n.candidate} · deferred`:n.title||n.kind,a);
   el('p',n.reason||n.rule||n.abstract||'',a);el('p',n.uncertainty||n.status||'No independent confidence estimate is available.',b,'note');
   if(n.fallback)el('p',`LLM selection failed (${n.fallback}); numerical policy used.`,b,'note');
   if(n.surprise)el('p',n.surprise,b,'note');
@@ -42,7 +42,7 @@ function show(id){const n=graph.nodes.find(n=>n.id===id);if(!n)return;
   el('h3','Connected evidence',b);for(const e of related.filter(e=>!sourceIds.has(e.source))){const id=e.source===n.id?e.target:e.source;const link=el('a',`${e.reason} (${id})`,el('p',null,b));link.href='#';link.onclick=event=>{event.preventDefault();pinned=id;show(id)}}
 }
 function draw(){const canvas=$('graph');canvas.replaceChildren();const positions={};let rounds=0,source=0;
-  for(const n of graph.nodes){if(n.kind==='goal')positions[n.id]=[275,25];else if(n.kind==='source'||n.kind==='search_failure')positions[n.id]=[15,90+source++*65];else if(n.kind==='decision'){positions[n.id]=[275,90+(n.round-1)*190];rounds=n.round}else if(n.kind==='observation')positions[n.id]=[275,180+(n.round-1)*190];else if(n.kind==='recommendation')positions[n.id]=[275,110+rounds*190]}
+  for(const n of graph.nodes){if(n.kind==='goal')positions[n.id]=[275,25];else if(n.kind==='source'||n.kind==='search_failure'||n.kind==='prior')positions[n.id]=[15,90+source++*65];else if(n.kind==='decision'){positions[n.id]=[275,90+(n.round-1)*190];rounds=n.round}else if(n.kind==='observation')positions[n.id]=[275,180+(n.round-1)*190];else if(n.kind==='recommendation')positions[n.id]=[275,110+rounds*190]}
   for(const n of graph.nodes.filter(n=>n.kind==='deferred')){const edge=graph.edges.find(e=>e.target===n.id),siblings=graph.edges.filter(e=>e.source===edge.source&&graph.nodes.find(n=>n.id===e.target)?.kind==='deferred');positions[n.id]=[535,positions[edge.source][1]+siblings.findIndex(e=>e.target===n.id)*56]}
   const height=Math.max(300,...Object.values(positions).map(p=>p[1]+70));canvas.setAttribute('viewBox',`0 0 735 ${height}`);
   for(const e of graph.edges){const from=positions[e.source],to=positions[e.target];if(!from||!to)continue;const x=from[0]+85,y=from[1]+38,tx=to[0]+85,ty=to[1];svg('path',{d:`M${x},${y} C${x},${(y+ty)/2} ${tx},${(y+ty)/2} ${tx},${ty}`,class:'edge'+(to[0]===535?' deferred-edge':'')},canvas)}

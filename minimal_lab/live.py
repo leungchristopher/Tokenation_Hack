@@ -13,25 +13,52 @@ if sys.platform.startswith('linux'):
     os.environ.setdefault('MUJOCO_GL', 'egl')
 
 from minimal_lab.lab import Lab
+from minimal_lab.video import compose, WIDTH, HEIGHT
 
 
 class RenderedLab(Lab):
     """Observe this backend instance's physics steps; never edit upstream robotics code."""
-    def __init__(self, *args, publish, **kwargs):
+    def __init__(self, *args, publish, video_path=None, **kwargs):
         import mujoco
-        super().__init__(*args, on_action=lambda action, detail: publish(action=action, transfer=detail), **kwargs)
+        self.action, self.detail, self.decision = 'initialising', {}, None
+        self.audit_graph = None
+        self.video, self.frame_count, self.timeline = None, 0, []
+        self.video_path = Path(video_path) if video_path else None
+        super().__init__(*args, on_action=self.action_event, **kwargs)
         self.publish = publish
-        self.renderer = mujoco.Renderer(self.backend.model, height=480, width=640)
+        self.backend.model.vis.global_.offwidth = 1280
+        self.backend.model.vis.global_.offheight = 960
+        self.renderer = mujoco.Renderer(self.backend.model, height=960, width=1280)
         self.original_step = self.backend.skills._step
         self.last_frame = 0
         self.backend.skills._step = self.step
+        if self.video_path:
+            import cv2
+            self.video_path.parent.mkdir(parents=True, exist_ok=True)
+            self.video = cv2.VideoWriter(str(self.video_path), cv2.VideoWriter_fourcc(*'mp4v'), 12, (WIDTH, HEIGHT))
+            if not self.video.isOpened():
+                raise RuntimeError('Could not open video writer.')
         self.frame()
+
+    def action_event(self, action, detail):
+        self.action, self.detail = action, detail
+        self.timeline.append(dict(frame=self.frame_count, decision=self.decision, action=action, detail=detail))
+        self.publish(action=action, transfer=detail)
+        if hasattr(self, 'renderer'):
+            self.frame()
 
     def frame(self):
         import cv2
         self.renderer.update_scene(self.backend.data, camera='side')
         rgb = self.renderer.render()
-        ok, jpeg = cv2.imencode('.jpg', cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        robot_bgr = bgr
+        bgr = compose(bgr, self.audit_graph, self.action, self.detail,
+                      self.recipe.name if self.recipe else 'UPO-ABTS')
+        if self.video is not None:
+            self.video.write(bgr)
+        self.frame_count += 1
+        ok, jpeg = cv2.imencode('.jpg', robot_bgr)
         if not ok:
             raise RuntimeError('Could not encode robot frame.')
         self.publish(frame=jpeg.tobytes())
@@ -48,11 +75,15 @@ class RenderedLab(Lab):
             self.frame()
         finally:
             self.renderer.close()
+            if self.video is not None:
+                self.video.release()
+                self.video_path.with_suffix('.timeline.json').write_text(json.dumps(self.timeline, indent=2))
 
 
 class Demo:
     def __init__(self, args):
         self.args, self.lock, self.frame = args, threading.Lock(), b''
+        self.lab = None
         self.state = dict(status='ready', phase='ready', graph=None, revision=0, frame_id=0,
                           budget=args.budget, mode='BO + Amass + LLM' if args.model else 'BO', cv=args.cv)
 
@@ -66,6 +97,15 @@ class Demo:
             self.state.update(update)
 
     def event(self, stage, graph):
+        if self.lab is not None:
+            self.lab.audit_graph = json.loads(json.dumps(graph))
+        if self.lab is not None and stage == 'decision':
+            self.lab.decision = next(n['id'] for n in reversed(graph['nodes']) if n['kind'] == 'decision')
+        if hasattr(self, 'output_dir'):
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            (self.output_dir/'progress.json').write_text(json.dumps(dict(stage=stage, graph=graph)))
+        if self.lab is not None and stage in ('decision', 'observation', 'recommendation'):
+            self.lab.frame()
         # Snapshot before the simulation continues mutating its own graph.
         self.publish(phase=stage, graph=json.loads(json.dumps(graph)), action='')
 
@@ -86,13 +126,17 @@ class Demo:
         from minimal_lab.task import demo_scorer, demo_solver
         a = self.args
         out = Path(a.out)/uuid4().hex[:10]
+        self.output_dir = out
+        def make_lab(*args, **kwargs):
+            self.lab = RenderedLab(*args, publish=self.publish, video_path=out/'assay.mp4', **kwargs)
+            return self.lab
         try:
             if a.model and not os.getenv('AMASS_API_KEY'):
                 raise ValueError('AMASS_API_KEY is required for literature mode.')
             task = Task(dataset=[Sample(id=f'seed-{a.seed}', input='Optimise the simulated assay.')],
                         solver=demo_solver(a.budget, a.seed, bool(a.model), bool(a.model), a.cv, str(out),
-                            on_event=self.event, lab_factory=lambda *args, **kwargs:
-                                RenderedLab(*args, publish=self.publish, **kwargs)), scorer=demo_scorer())
+                            on_event=self.event, lab_factory=make_lab,
+                            replicates=a.replicates, env_name=a.env), scorer=demo_scorer())
             log = eval(task, model=a.model or 'mockllm/model', display='none', ctl_server=False,
                        log_dir=str(out/'inspect'))[0]
             if log.status != 'success':
@@ -147,14 +191,16 @@ def serve(demo, port):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=8765)
-    parser.add_argument('--budget', type=int, default=6)
+    parser.add_argument('--env', choices=['upo_abts', 'zimmer_a549'], default='zimmer_a549')
+    parser.add_argument('--budget', type=int, default=24)
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--replicates', type=int, default=2, help='Independent preparations per selection; each consumes budget')
     parser.add_argument('--cv', type=float, default=0.15)
     parser.add_argument('--model', help='Inspect model ID; enables LLM selection and Amass research')
     parser.add_argument('--out', default='logs/live')
     args = parser.parse_args()
-    if not 1 <= args.budget <= 24 or not 0 <= args.cv <= 1:
-        parser.error('Use 1–24 experiments and a volume CV between 0 and 1.')
+    if args.budget < 1 or not 1 <= args.replicates <= args.budget or not 0 <= args.cv <= 1:
+        parser.error('Use a positive budget, replicates between 1 and budget, and a volume CV between 0 and 1.')
     server = serve(Demo(args), args.port)
     print(f'Open http://127.0.0.1:{server.server_port}', flush=True)
     try:

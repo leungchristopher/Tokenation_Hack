@@ -310,6 +310,7 @@ source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
     { name = "daqp" },
+    { name = "httpx" },
     { name = "inspect-ai" },
     { name = "mink" },
     { name = "mujoco" },
@@ -337,6 +338,7 @@ dev = [
 requires-dist = [
     { name = "anthropic", specifier = ">=1.11.0" },
     { name = "daqp" },
+    { name = "httpx" },
     { name = "inspect-ai" },
     { name = "mink" },
     { name = "mujoco" },

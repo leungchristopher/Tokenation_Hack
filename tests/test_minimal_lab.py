@@ -158,3 +158,57 @@ def test_deferral_revisited_and_confirmation_uses_mean(monkeypatch, goal, sign):
     edges = episode['graph']['edges']
     assert any(e['target']==decisions[2]['id'] and e['reason'].startswith('Reconsidered') for e in edges)
     assert len(episode['observations']) == 4  # no prior observation was erased by a deferral
+
+
+def test_planned_replicates_consume_budget_and_report_scatter():
+    values = iter([1., 3., 5.])
+    episode = asyncio.run(run(np.array([[0.]]), ['x'],
+        lambda p: dict(value=next(values), reported=[0.], ok=True), budget=3, replicates=3))
+    assert len(episode['observations']) == 3
+    assert episode['result']['mean'] == 3.
+    assert episode['result']['sample_sd'] == 2.
+    assert episode['result']['replication_complete']
+    decisions = [n for n in episode['graph']['nodes'] if n['kind'] == 'decision']
+    assert decisions[1]['reason'].startswith('Planned independent')
+    assert decisions[2]['phase'] == 'confirmation'
+
+
+def test_cited_prior_reaches_candidates_outside_random_shortlist():
+    from minimal_lab.evidence import prior_weights
+    X = np.arange(20, dtype=float).reshape(-1, 1)
+    async def research(context):
+        return [dict(title='Source', abstract='Higher settings improved response.', url='https://example.org')]
+    async def prior(context):
+        return dict(belief={'x': [19., .1]}, reason='Tentative transfer', uncertainty='Different system',
+                    citations=[dict(id=context['papers'][0]['id'], quote='Higher settings',
+                                    parameters=['x'], transfer_limit='Different system')])
+    episode = asyncio.run(run(X, ['x'],
+        lambda p: dict(value=p['x'], reported=[p['x']], ok=True),
+        budget=2, research=research, make_prior=prior))
+    assert episode['observations'][0]['candidate'] == 19
+    assert any(n['kind'] == 'prior' for n in episode['graph']['nodes'])
+    weights = prior_weights(X, ['x'], {'x': [19., .1]}, 0)
+    assert weights.min() >= .25 and weights.max() <= 1
+    assert prior_weights(X, ['x'], {'x': [19., .1]}, 100).min() > weights.min()
+
+
+def test_failed_result_is_never_included_in_recommendation():
+    episode = asyncio.run(run(np.array([[0.]]), ['x'],
+        lambda p: dict(value=999., reported=None, ok=False), budget=1))
+    assert episode['result']['candidate'] is None
+    assert episode['observations'][0]['value'] is None
+
+
+def test_fenced_model_json_is_decoded():
+    from minimal_lab.model_json import decode_reply
+    assert decode_reply('```json\n{"selected": 2}\n```') == {"selected": 2}
+
+
+def test_iteration_count_excludes_replicates_and_confirmation():
+    episode = asyncio.run(run(np.arange(6.).reshape(-1, 1), ['x'],
+        lambda p: dict(value=p['x'], reported=[p['x']], ok=True),
+        budget=8, replicates=2, confirmation_replicates=2))
+    decisions = [n for n in episode['graph']['nodes'] if n['kind'] == 'decision']
+    assert [n['phase'] for n in decisions] == ['proposal', 'replicate'] * 3 + ['confirmation'] * 2
+    assert episode['result']['optimisation_iterations'] == 3
+    assert len(episode['observations']) == 8
