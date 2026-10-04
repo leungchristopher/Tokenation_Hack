@@ -20,12 +20,16 @@ from epistemic.tasks import load_task
 
 @task
 def experimental_design(
-    task_name: str = "drug", budget: int = 8, seed: int = 0,
+    task_name: str = "drug", budget: int = 1000, seed: int = 0,
     provider: str = "none", execution: str = "perfect", graph_dir: str = "logs/current-inspect",
     max_searches: int = 0, evidence_file: str | None = None,
+    max_seconds: float = 300.0, max_model_tokens: int = 12_000,
+    acquisition: str = "ei", patience: int = 30,
 ) -> Task:
-    config = Config(task=task_name, budget=budget, seed=seed, provider=provider, execution=execution,
-                    max_searches=max_searches, evidence_file=evidence_file)
+    config = Config(task=task_name, budget=budget, max_seconds=max_seconds,
+                    max_model_tokens=max_model_tokens, patience=patience, seed=seed,
+                    provider=provider, execution=execution,
+                    max_searches=max_searches, evidence_file=evidence_file, acquisition=acquisition)
     spec, _ = load_task(task_name)
 
     @solver
@@ -45,12 +49,21 @@ def experimental_design(
                     def metadata(self):
                         return super().metadata() | generation.model_dump(exclude_none=True)
 
+                    def output_token_limit(self) -> int:
+                        return generation.max_tokens or 1400
+
                     def complete(self, prompt: str) -> str:
                         self.calls += 1
                         start = time.perf_counter()
-                        output = asyncio.run_coroutine_threadsafe(
-                            model.generate(prompt, config=generation), loop).result()
-                        self.latency_s += time.perf_counter() - start
+                        future = asyncio.run_coroutine_threadsafe(model.generate(prompt, config=generation), loop)
+                        remaining = None if self.deadline is None else max(self.deadline - start, 0.001)
+                        try:
+                            output = future.result(timeout=remaining)
+                        except TimeoutError:
+                            future.cancel()
+                            raise
+                        finally:
+                            self.latency_s += time.perf_counter() - start
                         if output.usage:
                             self.tokens += output.usage.total_tokens
                         return output.completion

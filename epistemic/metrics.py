@@ -29,6 +29,8 @@ def episode_metrics(episode: Episode) -> dict:
         "execution": episode.config.execution,
         "experiments": len(episode.hidden),
         "completed_budget": len(episode.hidden) == episode.config.budget,
+        "stop_reason": episode.stop_reason,
+        "elapsed_s": episode.elapsed_s,
         "best_true_value": best,
         "best_true_regret": min((s["regret"] for s in episode.hidden), default=None),
         "final_selection": selection,
@@ -51,5 +53,7 @@ def episode_metrics(episode: Episode) -> dict:
         "literature_searches": sum(
             1 for step in episode.trajectory
             if (step.get("literature_search") or {}).get("status") in ("success", "failed")
-        ),
+        ) + sum(1 for item in episode.initial_evidence.get("searches", [])
+                if item.get("status") in ("success", "failed")),
+        "active_literature_priors": len(episode.initial_evidence.get("priors", [])),
     }

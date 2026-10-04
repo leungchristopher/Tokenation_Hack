@@ -30,12 +30,12 @@ async def search_records(query: str, limit: int = 6) -> list[dict]:
     return (await search_result(query, limit))["records"]
 
 
-async def search_result(query: str, limit: int = 3) -> dict:
+async def search_result(query: str, limit: int = 3, timeout: float = 60.0) -> dict:
     import httpx
 
     if excluded_source(query):
         raise ValueError("This source is excluded from evaluation evidence.")
-    async with httpx.AsyncClient(timeout=60) as c:
+    async with httpx.AsyncClient(timeout=timeout) as c:
         r = await c.get(URL, params={"query": query, "limit": limit},
                         headers={"Authorization": f"Bearer {os.environ['AMASS_API_KEY']}"})
     r.raise_for_status()

@@ -1,4 +1,4 @@
-"""One GP-BO loop with optional evidence annotation and auditable graph exports."""
+"""One GP-BO loop with optional learned literature priors and auditable graph exports."""
 
 from epistemic.graph import EvidenceGraph
 from epistemic.loop import Config, Episode, run_episode

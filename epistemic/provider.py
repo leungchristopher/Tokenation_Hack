@@ -23,6 +23,8 @@ class Provider:
     model_revision: str = "unspecified"
     inference_stack: str = "unspecified OpenAI-compatible server"
     seed_supported: bool = False
+    deadline: float | None = None
+    token_limit: int | None = None
 
     def metadata(self) -> dict[str, Any]:
         return {"provider": self.name, "model": self.model, "base_url": self.base_url,
@@ -32,6 +34,17 @@ class Provider:
 
     def complete(self, prompt: str) -> str:
         raise NotImplementedError
+
+    def output_token_limit(self) -> int:
+        return 0
+
+    def call_limit(self, prompt: str) -> str | None:
+        if self.deadline is not None and time.perf_counter() >= self.deadline:
+            return "time_limit"
+        estimated = len(prompt.encode("utf-8")) + 128 + self.output_token_limit()
+        if self.token_limit is not None and self.tokens + estimated > self.token_limit:
+            return "model_token_limit"
+        return None
 
 
 @dataclass
@@ -61,6 +74,9 @@ class OpenAICompatibleProvider(Provider):
     def metadata(self) -> dict[str, Any]:
         return super().metadata() | {"max_tokens": self.max_tokens, "server_fingerprint": self.server_fingerprint}
 
+    def output_token_limit(self) -> int:
+        return self.max_tokens
+
     def complete(self, prompt: str) -> str:
         import httpx
 
@@ -76,7 +92,9 @@ class OpenAICompatibleProvider(Provider):
         self.calls += 1
         start = time.perf_counter()
         try:
-            response = httpx.post(f"{self.base_url.rstrip('/')}/chat/completions", json=body, timeout=180,
+            remaining = 180.0 if self.deadline is None else max(self.deadline - time.perf_counter(), 0.001)
+            response = httpx.post(f"{self.base_url.rstrip('/')}/chat/completions", json=body,
+                                  timeout=min(180.0, remaining),
                                   headers={"Authorization": f"Bearer {key}"})
             response.raise_for_status()
             payload = response.json()

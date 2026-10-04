@@ -63,6 +63,7 @@ class Proposal:
     search_query: str | None = None
     evidence_valid: bool | None = None
     failures: list[str] = field(default_factory=list)
+    prior_gates: dict[str, tuple[float, float]] = field(default_factory=dict)
 
 
 EVIDENCE_PROMPT = """EVIDENCE_ONLY: annotate a GP-BO experiment; never select or replace it.
@@ -90,7 +91,9 @@ class EvidenceAnnotator:
         self.calls = 0
         self.seen_sources: set[str] = set()
         self.last_prompt: str | None = None
-        self.provider.prompt_version = "v4-gp-evidence"
+        self.limit_reason: str | None = None
+        if max_calls:
+            self.provider.prompt_version = "v4-gp-evidence"
 
     def annotate(self, proposal: Proposal, graph: EvidenceGraph, surrogate: Surrogate, round: int) -> None:
         self.last_prompt = None
@@ -102,15 +105,34 @@ class EvidenceAnnotator:
         if not needed or self.calls >= self.max_calls:
             return
         self.calls += 1
+        context = {
+            "claims": [
+                c.model_dump(include={"id", "statement", "scope", "status", "evidence", "discriminating_result"})
+                for c in list(graph.claims.values())[-12:]
+            ],
+            "sources": [
+                {"id": e.id, "title": e.title, "reference": e.reference, "abstract": e.abstract[:600]}
+                for e in list(graph.evidence_records.values())[-6:]
+            ],
+            "observations": [
+                o.model_dump(include={"id", "candidate_id", "reported_delivered", "value_shown"})
+                for o in list(graph.observations.values())[-3:]
+            ],
+        }
+        if self.with_edges:
+            context["edges"] = [e.model_dump() for e in graph.edges[-12:]]
         self.last_prompt = EVIDENCE_PROMPT.format(
             briefing=self.task.briefing(self.budget), proposal=json.dumps(vars(proposal)),
             model=json.dumps(vars(surrogate.model_uncertainty())),
-            state=json.dumps(graph.view(round, with_edges=self.with_edges)),
+            state=json.dumps(context),
             searches_remaining=self.searches_remaining,
             revisable_claims=[c.id for c in graph.claims.values()
                              if c.id.startswith("H") and c.source == "model_conjecture"],
             schema=json.dumps(EvidenceOutput.model_json_schema(), separators=(",", ":")),
         )
+        self.limit_reason = self.provider.call_limit(self.last_prompt)
+        if self.limit_reason:
+            return
         try:
             raw = self.provider.complete(self.last_prompt)
             if excluded_source(raw):
@@ -137,9 +159,20 @@ def select(task: TaskSpec, graph: EvidenceGraph, surrogate: Surrogate, rng: np.r
     best = (max if task.direction == "maximize" else min)(shown) if shown else None
     ranked = surrogate.ranked(best, exclude=tried, top=1) or surrogate.ranked(best, top=1)
     cid, score = ranked[0]
+    gates = ", ".join(
+        f"{prior_id} {mean:.2f}±{sd:.2f}"
+        for prior_id, (mean, sd) in surrogate.gates.items()
+    )
+    rationale = f"Highest expected improvement ({score:.5g}) under the fitted GP; not proof of optimality."
+    if gates:
+        rationale += f" Learned literature gates: {gates}."
     return Proposal(
-        cid, f"Highest expected improvement ({score:.5g}) under the fitted GP; not proof of optimality.",
+        cid, rationale,
         prediction=surrogate.response(cid).mean,
-        evidence=[key for key in ("K_best", "K_calibration") if key in graph],
+        evidence=[
+            *[prior.id for prior in surrogate.priors if prior.id in graph],
+            *[key for key in ("K_best", "K_calibration") if key in graph],
+        ],
         assumptions=["A_gp", "A0"],
+        prior_gates=dict(surrogate.gates),
     )

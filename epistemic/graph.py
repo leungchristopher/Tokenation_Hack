@@ -109,6 +109,9 @@ class Claim(BaseModel):
     revisions: list[Revision] = Field(default_factory=list)
     unresolved_transfer_assumptions: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
+    belief: dict[str, tuple[float, float]] = Field(default_factory=dict)
+    trust: float | None = Field(default=None, ge=0.0, le=1.0)
+    trust_reason: str = ""
     kind: Literal["claim"] = "claim"
 
     @model_validator(mode="after")
@@ -140,6 +143,7 @@ class Decision(BaseModel):
     search_query: str | None = None
     implications: str = ""
     policy: str = "gp_bo"
+    prior_gates: dict[str, tuple[float, float]] = Field(default_factory=dict)
     kind: Literal["decision"] = "decision"
 
 

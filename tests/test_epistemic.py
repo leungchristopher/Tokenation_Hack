@@ -13,12 +13,13 @@ from epistemic.amass import records_to_claims, search_result
 from epistemic.evidence import external_evidence, ingest_literature, seed_graph
 from epistemic.execution import PerfectExecution, PerturbedExecution
 from epistemic.graph import Assumption, Claim, EvidenceGraph, EvidenceRecord, Observation, UncertaintyRecord
+from epistemic.literature import Calibrations, Hypotheses
 from epistemic.loop import Config, Episode, run_episode
 from epistemic.metrics import episode_metrics
 from epistemic.provider import MockProvider, get_provider
 from epistemic.render import actions_graph, export, to_html
 from epistemic.source_filter import excluded_source
-from epistemic.surrogate import Surrogate
+from epistemic.surrogate import NumericalPrior, Surrogate
 from epistemic.tasks import TASKS, Evaluator, load_task
 
 
@@ -130,8 +131,68 @@ def test_same_loop_is_seeded_and_predictions_remain_numerical(task_name, acquisi
     assert a.trajectory == b.trajectory and a.hidden == b.hidden
     assert a.graph.model_dump() == b.graph.model_dump()
     assert all(d.prediction_source in ("numerical_model", "unavailable") for d in a.decisions)
-    assert episode_metrics(a) == episode_metrics(b)
+    a_metrics, b_metrics = episode_metrics(a), episode_metrics(b)
+    a_metrics.pop("elapsed_s")
+    b_metrics.pop("elapsed_s")
+    assert a_metrics == b_metrics
     assert a.provider_metadata["calls"] == 0
+
+
+def test_time_and_model_token_limits_stop_before_experiments():
+    timed = run_episode(Config(budget=100, max_seconds=0))
+    assert timed.stop_reason == "time_limit"
+    assert not timed.hidden
+
+    token_limited = run_episode(
+        Config(budget=100, max_model_tokens=1, max_evidence_calls=3),
+        provider=MockProvider(),
+    )
+    assert token_limited.stop_reason == "model_token_limit"
+    assert len(token_limited.hidden) == 3
+    assert token_limited.provider_metadata["calls"] == 0
+
+
+def test_stagnation_stops_after_patience_non_improving_observations():
+    episode = run_episode(Config(task="drug", budget=1000, patience=5, max_seconds=60))
+    assert episode.stop_reason == "stagnation"
+    assert len(episode.hidden) < 1000
+
+    observations = sorted(episode.graph.observations.values(), key=lambda item: item.round)
+    values = [item.value_shown for item in observations if item.value_shown is not None]
+    assert len(values) >= 6
+    best_before = (max if episode.task.direction == "maximize" else min)(values[:-5])
+    for value in values[-5:]:
+        assert not (value > best_before if episode.task.direction == "maximize" else value < best_before)
+
+
+def test_zero_patience_disables_stagnation_stopping():
+    episode = run_episode(Config(budget=6, patience=0))
+    assert len(episode.hidden) == 6
+    assert episode.stop_reason == "experiment_limit"
+
+
+def test_hypothesis_text_fields_are_trimmed():
+    long_text = "x" * 311
+    payload = json.dumps({"hypotheses": [{
+        "statement": long_text,
+        "scope": "s" * 201,
+        "query": long_text,
+        "belief": {"x": {"best": 0.5, "width_fraction": 0.2}},
+        "discriminating_result": long_text,
+    }]})
+    hypothesis = Hypotheses.model_validate_json(payload).hypotheses[0]
+    assert len(hypothesis.statement) == 300
+    assert len(hypothesis.scope) == 200
+    assert len(hypothesis.query) == 300
+    assert len(hypothesis.discriminating_result) == 300
+
+
+def test_calibration_reason_is_trimmed():
+    payload = json.dumps({"calibrations": [{
+        "index": 0, "trust": 0.5, "reason": "r" * 747, "evidence_ids": [],
+    }]})
+    calibration = Calibrations.model_validate_json(payload).calibrations[0]
+    assert len(calibration.reason) == 300
 
 
 @pytest.fixture(scope="module")
@@ -379,7 +440,8 @@ def test_interactive_graph_has_one_canvas_and_incumbent_dependencies(episode):
     assert content.count('data-a-diagram-canvas="true"') == 1
     assert content.count('data-a-node="true"') == len(episode.decisions) + 2
     assert "graph-contract" not in content
-    assert "No literature used in this run." in content
+    assert "No literature used in this run." not in content
+    assert "Branches show the EI reference" not in content
     assert "data-close-detail" in content
     for decision in episode.decisions[3:]:
         earlier = [o for o in episode.graph.observations.values()
@@ -417,3 +479,114 @@ def test_provider_default_never_calls_a_model():
     assert MockProvider().complete("EVIDENCE_ONLY:") == '{"claim_updates": []}'
     with pytest.raises(KeyError):
         get_provider("old_selection_controller")
+
+
+class LiteratureFixture(MockProvider):
+    def complete(self, prompt):
+        self.calls += 1
+        self.tokens += len(prompt) // 4
+        assert "at most 300 characters" in prompt
+        if self.calls == 1:
+            assert "scope at most 200 characters" in prompt
+            return json.dumps({"hypotheses": [{
+                "statement": "Higher taxol dose may reduce survival in this assay.",
+                "scope": "A549 cells under the task exposure conditions",
+                "query": "A549 taxol dose response assay",
+                "belief": {"taxol_uM": {"best": 0.1, "width_fraction": 0.3}},
+                "discriminating_result": "Compare high and low taxol with other doses held fixed.",
+            }]})
+        assert "PRIVATE_HELD_OUT_RESULT" not in prompt
+        return json.dumps({"calibrations": [{
+            "index": 0, "trust": 0.6, "reason": "Cell-line and timing transfer remain uncertain.",
+            "evidence_ids": ["EP1_1"],
+        }]})
+
+
+def literature_fixture_search(query):
+    return {"records": [
+        {"title": "Held out", "doi": "10.1073/pnas.1606301113", "abstract": "PRIVATE_HELD_OUT_RESULT"},
+        {"title": "Independent assay", "doi": "10.1234/independent", "abstract": "Reported assay details."},
+    ]}
+
+
+def test_gated_prior_changes_the_shared_posterior_and_learns_uncertain_weights():
+    task, evaluator = load_task("drug")
+    history = [(task.ids()[index], evaluator.truth(task.ids()[index])) for index in (31, 220, 400)]
+    plain = Surrogate(task, seed=0).fit(history)
+    empty = Surrogate(task, seed=0).with_priors([]).fit(history)
+    np.testing.assert_array_equal(plain._mean, empty._mean)
+    np.testing.assert_array_equal(plain._sd, empty._sd)
+    prior = NumericalPrior("P1", {"taxol_uM": (0.1, 0.3)}, 0.6)
+    gated = Surrogate(task, seed=0).with_priors([prior]).fit(history)
+    assert not np.allclose(plain._mean, gated._mean)
+    assert gated.ranked(min(value for _, value in history), top=10) != plain.ranked(
+        min(value for _, value in history), top=10
+    )
+    mean, sd = gated.gates["P1"]
+    assert np.isfinite(mean) and 0 < sd < 0.5
+    assert mean != prior.trust
+    assert np.isfinite(gated._sd).all()
+
+
+def test_bounded_literature_calibrates_prior_and_exports_gate_provenance(tmp_path):
+    provider = LiteratureFixture()
+    episode = run_episode(
+        Config(acquisition="gated_ei", budget=5, max_searches=1),
+        provider=provider, literature_search=literature_fixture_search,
+    )
+    assert len(episode.hidden) == 5 and provider.calls == 2
+    prior = episode.graph.claims["P1"]
+    assert prior.trust == 0.6 and prior.evidence == ["EP1_1"]
+    assert prior.belief == {"taxol_uM": (0.1, 0.3)}
+    assert {episode.graph.uncertainties[i].category for i in prior.uncertainties} == {
+        "source", "transfer", "mechanistic"
+    }
+    dependencies = [edge for edge in episode.graph.edges if edge.target == "P1" and edge.kind == "depends_on"]
+    assert dependencies and all(edge.note.startswith("gate ") for edge in dependencies)
+    assert episode.graph.decisions["D4"].policy == "gated_gp_bo"
+    assert "Learned literature gates" in episode.graph.decisions["D4"].justification
+    metrics = episode_metrics(episode)
+    assert metrics["literature_searches"] == 1 and metrics["active_literature_priors"] == 1
+    html = to_html(episode)
+    assert "Initial trust: 0.60" in html and "Numerical prior used in acquisition" in html
+    assert "Literature prior: gate" in html
+    assert "Cell-line and timing" in html
+    assert "Largest expected" in html
+    assert 'data-a-edge="true" tabindex="0" role="button"' in html
+    assert "&quot;prior_gates&quot;" in html
+    assert "depends_on" in html and not excluded_source(html)
+    assert "Branches show the EI reference" not in html
+    episode.save(tmp_path)
+    termination = json.loads((tmp_path / "termination.json").read_text())
+    assert termination["reason"] == "experiment_limit" and termination["experiments"] == 5
+    assert json.loads((tmp_path / "literature_setup.json").read_text())["priors"]
+
+
+@pytest.mark.parametrize("settings,reason", [
+    ({"max_seconds": 0}, "time_limit"), ({"max_model_tokens": 1}, "model_token_limit"),
+])
+def test_literature_setup_obeys_resource_limits_before_spending(settings, reason):
+    provider = LiteratureFixture()
+    episode = run_episode(
+        Config(acquisition="gated_ei", max_searches=1, **settings),
+        provider=provider, literature_search=literature_fixture_search,
+    )
+    assert episode.stop_reason == reason and not episode.hidden
+    assert provider.calls == 0 and not episode.initial_evidence["searches"]
+
+
+def test_optional_literature_failures_fall_back_to_plain_gp():
+    def unavailable(query):
+        raise RuntimeError("fixture-only retrieval failure")
+
+    provider = LiteratureFixture()
+    episode = run_episode(
+        Config(acquisition="gated_ei", budget=4, max_searches=1),
+        provider=provider, literature_search=unavailable,
+    )
+    baseline = run_episode(Config(budget=4))
+    assert len(episode.hidden) == 4 and provider.calls == 1
+    assert episode.final_selection() == baseline.final_selection()
+    assert [row["intended_id"] for row in episode.hidden] == [row["intended_id"] for row in baseline.hidden]
+    assert episode.initial_evidence["searches"][0]["status"] == "failed"
+    assert not episode.initial_evidence["priors"]

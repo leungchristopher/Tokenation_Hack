@@ -13,7 +13,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("run", "literature"))
     parser.add_argument("--task", choices=("enzyme", "drug"), default="drug")
-    parser.add_argument("--budget", type=int, default=8)
+    parser.add_argument("--acquisition", choices=("ei", "gated_ei", "random"), default="ei")
+    parser.add_argument("--budget", type=int, default=1000, help="Safety cap; time is the primary stopping limit")
+    parser.add_argument("--max-seconds", type=float, default=300.0)
+    parser.add_argument("--max-model-tokens", type=int, default=12_000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--provider", default="none", help="none or openai:<model>; mock is a test fixture")
     parser.add_argument("--execution", choices=("perfect", "perturbed"), default="perfect")
@@ -34,7 +37,9 @@ def main() -> None:
             json.dump(result, handle, indent=2)
         return
     config = Config(
-        task=args.task, budget=args.budget, seed=args.seed, execution=args.execution,
+        task=args.task, budget=args.budget, max_seconds=args.max_seconds,
+        max_model_tokens=args.max_model_tokens, seed=args.seed, execution=args.execution,
+        acquisition=args.acquisition,
         provider=args.provider, temperature=args.temperature,
         evidence_file=args.evidence_file, max_searches=args.max_searches,
     )

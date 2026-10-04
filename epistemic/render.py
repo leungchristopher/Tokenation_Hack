@@ -145,7 +145,13 @@ def _edge(parts: list[str], *, source: str, target: str, kind: str,
     middle = sx + (tx - sx) * 0.52
     title = f"{source} {kind} {target}"
     path = f"M{sx},{sy} C{middle},{sy} {middle},{ty} {tx},{ty}"
-    group = f'<g data-edge-source="{_esc(source)}" data-edge-target="{_esc(target)}" data-edge-kind="{_esc(kind)}">'
+    detail = _detail({"kind": "edge", "source": source, "target": target, "relationship": kind,
+                      "reason": note or label or kind})
+    group = (
+        f'<g data-a-edge="true" tabindex="0" role="button" data-a-title="{_esc(title)}" '
+        f'data-a-detail="{_esc(detail)}" data-edge-source="{_esc(source)}" '
+        f'data-edge-target="{_esc(target)}" data-edge-kind="{_esc(kind)}">'
+    )
     parts.append(
         f'{group}<title>{_esc(title)}</title><path class="a-edge edge {kind}" d="{path}" '
         f'marker-end="url(#arrow-{kind})"/>'
@@ -159,7 +165,7 @@ def _edge(parts: list[str], *, source: str, target: str, kind: str,
             f'{group}<title>{_esc(title)}</title><path class="a-edge edge {kind}" d="{path}" '
             f'marker-end="url(#arrow-{kind})"/>'
         )
-    lines = _wrap(label, 23, 3) if label else [kind]
+    lines = _wrap(label, 23, 4) if label else [kind]
     label_width = max(len(line) for line in lines) * 6 + 12
     if label:
         label_x = (sx + tx - label_width) / 2 + 6
@@ -483,6 +489,7 @@ def actions_graph(episode: Episode) -> dict:
             ],
             "data_used": [o.id for o in observations if o.round < observation.round],
             "rationale": decision.justification,
+            "prior_gates": decision.prior_gates,
         })
         if len(nodes) > 1:
             edges.append({
@@ -550,11 +557,11 @@ def to_svg(episode: Episode) -> str:
     previous: list[dict[str, Any]] = []
     for node in actions["nodes"]:
         parent = "Root"
-        label = "Initial design"
+        label = "Seeded initial exploration"
         note = node.get("rationale", "")
         if node["kind"] == "selection":
             parent = next(n["id"] for n in previous if n["observation"]["id"] == node["observation_id"])
-            label, note = "Greedy best observed", node["uncertainty"]
+            label, note = "Best observed result among tested candidates", node["uncertainty"]
         elif "Highest expected improvement" in node["rationale"] and previous:
             observed = [n for n in previous if n["observation"]["value_shown"] is not None]
             if observed:
@@ -564,7 +571,7 @@ def to_svg(episode: Episode) -> str:
                 parent = incumbent["id"]
                 node["ei_reference"] = incumbent["observation"]["id"]
             match = re.search(r"expected improvement \(([^)]+)\)", node["rationale"])
-            label = f"EI {match[1]}" if match else "Expected improvement"
+            label = f"Largest expected improvement: {match[1]}" if match else "Largest expected improvement"
             prediction = node["forecast"]
             if prediction:
                 label += f" · GP {prediction['mean']:.3g} ± {prediction['latent_sd']:.2g}"
@@ -581,6 +588,18 @@ def to_svg(episode: Episode) -> str:
     claims = [c for c in episode.graph.claims.values() if not c.benchmark_generated
               and c.id not in ("K1", "K_best", "K_calibration")]
     sources = [e for e in episode.graph.evidence_records.values() if e.source == "literature"]
+    evidence_lines: dict[str, list[str]] = {}
+    heights = {record_id: 136 for record_id in [*nodes, "Root"]}
+    evidence_nodes: list[EvidenceRecord | Claim] = [*sources, *claims]
+    for record in evidence_nodes:
+        lines = _wrap(record.title if isinstance(record, EvidenceRecord) else record.statement,
+                      34, 2 if isinstance(record, Claim) and record.belief else 3)
+        if isinstance(record, Claim) and record.belief:
+            for name, (best, width_fraction) in record.belief.items():
+                lines.extend(_wrap(f"{name}≈{best:g}; width {width_fraction:.2g}", 34, 2))
+            lines.append(f"Initial trust: {record.trust:.2f}" if record.trust is not None else "Initial trust: unavailable")
+        evidence_lines[record.id] = lines
+        heights[record.id] = max(136, 76 + 15 * len(lines))
     left = 812 if claims or sources else 32
     positions: dict[str, tuple[int, int]] = {}
     leaf = 0
@@ -597,9 +616,11 @@ def to_svg(episode: Episode) -> str:
     place("Root", 0)
     for index, source in enumerate(sources):
         positions[source.id] = (32, 42 + index * 175)
-    for index, claim in enumerate(claims):
-        positions[claim.id] = (412, 42 + index * 175)
-    height = max(y for _, y in positions.values()) + 180
+    claim_y = 42
+    for claim in claims:
+        positions[claim.id] = (412, claim_y)
+        claim_y += heights[claim.id] + 39
+    height = max(y + heights[record_id] for record_id, (_, y) in positions.items()) + 44
     width = max(x for x, _ in positions.values()) + 280
     edges: list[str] = []
     parts: list[str] = []
@@ -615,16 +636,23 @@ def to_svg(episode: Episode) -> str:
             continue
         sx, sy = positions[source_id]
         tx, ty = positions[target_id]
+        label = f"{edge.kind.replace('_', ' ')}: {edge.note}" if edge.note else edge.kind.replace("_", " ")
+        if edge.kind == "depends_on" and edge.note.startswith("gate "):
+            label = f"Literature prior: {edge.note}"
         _edge(edges, source=source_id, target=target_id, kind=edge.kind,
-              start=(sx + 240, sy + 68), end=(tx, ty + 68), note=edge.note)
+              start=(sx + 240, sy + heights[source_id] / 2), end=(tx, ty + heights[target_id] / 2),
+              note=edge.note, label=label)
 
     x, y = positions["Root"]
     _node(parts, record_id="Root", dom_id="reasoning-Root", x=x, y=y, width=240, height=136,
           title=episode.task.name, lines=[f"GP-BO · {episode.task.direction}",
-                                        f"{len(previous)} experiments"],
+                                        f"{len(previous)} experiments",
+                                        f"Stop: {episode.stop_reason.replace('_', ' ')}"],
           footer="Select nodes for details",
           detail=_detail({"briefing": episode.task.briefing(episode.config.budget),
                           "limitations": episode.task.limitations,
+                          "termination": {"reason": episode.stop_reason, "elapsed_s": episode.elapsed_s,
+                                          "model_tokens": episode.provider_metadata.get("tokens", 0)},
                           "assumptions": [a.model_dump() for a in episode.graph.assumptions.values()]}),
           css="assumption", centered=True)
     for record_id, node in nodes.items():
@@ -643,21 +671,24 @@ def to_svg(episode: Episode) -> str:
             footer = "Simulated noise · model uncertain" if observation["measurement_noise"] else "Model uncertain"
         _node(parts, record_id=record_id, dom_id=f"reasoning-{record_id}", x=x, y=y, width=240, height=136,
               title=title, lines=lines, footer=footer, detail=_detail(node), css="observation", centered=True)
-    evidence_nodes: list[EvidenceRecord | Claim] = [*sources, *claims]
     for record in evidence_nodes:
         x, y = positions[record.id]
         is_source = isinstance(record, EvidenceRecord)
         title = f"{record.id} · {'Source' if is_source else 'Claim'}"
-        lines = _wrap(record.title if isinstance(record, EvidenceRecord) else record.statement, 34, 3)
+        lines = evidence_lines[record.id]
         dependency = any(e.kind == "depends_on" and e.source in nodes and e.target == record.id
                          for e in episode.graph.edges)
-        footer = "Source details" if is_source else ("Annotation only" if dependency else "Not used in acquisition")
+        if isinstance(record, EvidenceRecord):
+            footer = "Source details"
+        else:
+            footer = ("Numerical prior used in acquisition" if record.belief and dependency
+                      else "Annotation only" if dependency else "Not used in acquisition")
         detail = record.model_dump(mode="json")
         if isinstance(record, Claim):
             detail["uncertainty_records"] = [
                 episode.graph.uncertainties[i].model_dump(mode="json") for i in record.uncertainties
             ]
-        _node(parts, record_id=record.id, dom_id=f"reasoning-{record.id}", x=x, y=y, width=240, height=136,
+        _node(parts, record_id=record.id, dom_id=f"reasoning-{record.id}", x=x, y=y, width=240, height=heights[record.id],
               title=title, lines=lines, footer=footer, detail=_detail(detail),
               css="source" if is_source else "claim", centered=True)
     if not previous:
@@ -676,15 +707,13 @@ def _namespace_svg(svg: str, prefix: str) -> str:
 HTML_STYLE = """
 <style>
 .a-shell{max-width:none;padding:12px 20px}
-.a-header{align-items:center;padding-bottom:8px}
-.a-header__title{font-size:15px;line-height:20px}
-.a-header__subtitle,.a-footnote{display:none}
+.a-header{position:fixed;z-index:9;right:12px;top:12px;padding:0;border:0}
+.a-header>div,.a-header__subtitle,.a-footnote{display:none}
 .a-header .a-btn{width:28px;height:28px}
 .a-diagram{border:0;border-radius:0;background:transparent;box-shadow:none;padding:0}
 .graph-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:8px 0}
 .graph-toolbar .a-btn{padding:3px 9px;min-height:28px}
-.graph-caption{font-size:11px;line-height:16px;color:rgb(var(--text-secondary));margin:0}
-.graph-scroll{height:calc(100vh - 150px);min-height:340px;overflow:hidden;overscroll-behavior:contain}
+.graph-scroll{height:calc(100vh - 56px);min-height:340px;overflow:hidden;overscroll-behavior:contain}
 .graph-scroll .a-diagram__canvas{width:100%;height:100%;touch-action:none}
 .a-diagram .a-inspector{position:fixed;z-index:10;right:12px;top:70px;width:min(360px,calc(100vw - 24px));
  max-height:calc(100vh - 90px);overflow:auto;background:rgb(var(--bg-elevated));padding:16px;
@@ -703,16 +732,17 @@ HTML_STYLE = """
 .a-diagram .record.assumption .record-box{fill:rgb(var(--bg-wash));stroke-dasharray:none}
 .a-diagram svg text{fill:rgb(var(--text-primary))}
 .a-diagram svg .muted,.a-diagram svg .badge-text{fill:rgb(var(--text-secondary))}
-.a-diagram svg .node-title{font-size:12px;font-weight:500}
-.a-diagram svg .node-copy{font-size:11px}
+.a-diagram svg .node-title{font-size:13px;font-weight:600}
+.a-diagram svg .node-copy{font-size:12px}
 .a-diagram svg .muted{font-size:10px}
 .a-diagram svg .edge-label{font-size:10px;font-weight:400}
 .a-diagram svg .edge{stroke-width:1}
+.a-diagram [data-a-edge]:hover .edge,.a-diagram [data-a-edge]:focus .edge{stroke-width:2.5}
 .a-diagram svg .depends_on{stroke-dasharray:none}
 .a-diagram .record-selected .record-box{stroke:rgb(var(--text-accent));stroke-width:2.8}
 .a-diagram .record-related .record-box{stroke:rgb(var(--text-accent));stroke-width:1.8;stroke-dasharray:3 2}
 .a-diagram .edge-unrelated{opacity:.2}
-@media(max-width:500px){.a-shell{padding:8px}.graph-caption{max-width:100%}}
+@media(max-width:500px){.a-shell{padding:8px}}
 @media print{
  .graph-scroll{height:auto;min-height:0;overflow:visible}
  .graph-scroll .a-diagram__canvas{width:100%;height:auto}
@@ -745,9 +775,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const select = node => {
       selected = node;
       const id = node.dataset.recordId;
+      const isEdge = node.hasAttribute("data-a-edge");
       const related = new Set();
       edges.forEach(edge => {
-        const connected = edge.dataset.edgeSource === id || edge.dataset.edgeTarget === id;
+        const connected = isEdge ? edge === node : edge.dataset.edgeSource === id || edge.dataset.edgeTarget === id;
         edge.classList.toggle("edge-unrelated", !connected);
         if (connected) { related.add(edge.dataset.edgeSource); related.add(edge.dataset.edgeTarget); }
       });
@@ -781,6 +812,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         add("EI reference observation", record.ei_reference);
         add("All observations used by GP", record.data_used.join(", ") || "None");
+        add("Learned literature gates · signed coefficients, not probabilities", record.prior_gates);
       } else {
         Object.entries(record).filter(([key]) => !["metadata", "revisions", "uncertainty_records"].includes(key))
           .forEach(([key,value]) => add(key.replaceAll("_", " "), value));
@@ -810,12 +842,12 @@ document.addEventListener("DOMContentLoaded", () => {
       });
     };
     episode.addEventListener("click", event => {
-      const node = event.target.closest("[data-a-node]");
+      const node = event.target.closest("[data-a-node],[data-a-edge]");
       if (node) select(node);
     });
     episode.addEventListener("keydown", event => {
       if (event.key !== "Enter" && event.key !== " ") return;
-      const node = event.target.closest("[data-a-node]");
+      const node = event.target.closest("[data-a-node],[data-a-edge]");
       if (node) { event.preventDefault(); select(node); }
     });
   });
@@ -825,20 +857,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
 
 def html_body(episode: Episode, prefix: str = "episode") -> str:
-    literature = any(e.source == "literature" for e in episode.graph.evidence_records.values())
-    evidence_note = "Literature shown only where recorded." if literature else "No literature used in this run."
     return (
         f'<article data-episode="{_esc(prefix)}">'
         '<div class="a-diagram" data-a-diagram tabindex="0" aria-label="Actions and reasoning">'
         '<div class="graph-toolbar a-no-print">'
         '<button type="button" class="a-btn a-btn--outline" data-a-zoom="out" aria-label="Zoom out">−</button>'
         '<button type="button" class="a-btn a-btn--outline" data-a-zoom="in" aria-label="Zoom in">+</button>'
-        '<button type="button" class="a-btn a-btn--outline" data-a-zoom="reset">Fit</button>'
-        f'<span class="graph-caption">{_esc(episode.task.name)} · {_esc(episode.task.outcome_unit)} · '
-        f'{evidence_note}</span></div>'
+        '<button type="button" class="a-btn a-btn--outline" data-a-zoom="reset">Fit</button></div>'
         f'<div class="graph-scroll">{_namespace_svg(to_svg(episode), f"{prefix}-reasoning")}</div>'
-        '<p class="graph-caption">Branches show the EI reference, not causal ancestry. The GP uses all prior results. '
-        'Drag to pan; Ctrl + wheel or + / − to zoom. Select a node for inputs, sources and uncertainty.</p>'
         '<aside class="a-inspector" data-a-inspector aria-label="Selected record" aria-live="polite" hidden>'
         '<div class="graph-detail-head"><p class="a-inspector__title" data-a-inspector-title></p>'
         '<button type="button" class="a-btn a-btn--outline" data-close-detail aria-label="Close details">Close</button></div>'
