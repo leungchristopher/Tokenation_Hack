@@ -8,7 +8,15 @@ from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern, WhiteKernel
 
 
-def shortlist(X, observations, attempted, rng, direction=1):
+def observed_means(observations):
+    grouped = {}
+    for o in observations:
+        if o['value'] is not None:
+            grouped.setdefault(o['candidate'], []).append(o['value'])
+    return {i:float(np.mean(values)) for i,values in grouped.items()}
+
+
+def shortlist(X, observations, rng, direction=1):
     """EI, response exploration and an incumbent repeat. No literature pseudo-observations."""
     good = [o for o in observations if o['value'] is not None]
     span = np.ptp(X, axis=0)
@@ -38,16 +46,15 @@ def shortlist(X, observations, attempted, rng, direction=1):
     gp.fit(training, (y-centre)/spread)
     mu, sd = gp.predict(Z, return_std=True)
     mu, sd = mu*spread+centre, sd*spread
-    delta = mu-max(y)
+    means = observed_means(good)
+    incumbent = max(means, key=lambda i:direction*means[i])
+    delta = mu-direction*means[incumbent]
     z = delta/np.maximum(sd, 1e-9)
     ei = delta*norm.cdf(z) + sd*norm.pdf(z)
-    unseen = np.array([i for i in range(len(X)) if i not in attempted], dtype=int)
-    incumbent = max(good, key=lambda o: direction*o['value'])['candidate']
-    choices = []
-    if len(unseen):
-        choices += [(int(unseen[np.argmax(ei[unseen])]), 'Highest expected improvement.'),
-                    (int(unseen[np.argmax(sd[unseen])]), 'Largest predictive uncertainty among untested conditions.')]
-    choices += [(incumbent, 'Repeat the best observed condition to check noise and delivery.')]
+    # An observation or deferral never proves a condition cannot improve.
+    choices = [(int(np.argmax(ei)), 'Highest expected improvement across all conditions; repeats allowed.'),
+               (int(np.argmax(sd)), 'Largest predictive uncertainty across all conditions; repeats allowed.'),
+               (incumbent, 'Repeat the best observed mean to check noise and delivery.')]
     unique = {i: why for i, why in reversed(choices)}
     return [dict(candidate=i, mean=float(direction*mu[i]), sd=float(sd[i]), ei=float(ei[i]), reason=unique[i])
             for i in dict(choices)], gp
@@ -91,7 +98,7 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
     direction = 1 if goal == 'maximize' else -1
     rng = np.random.default_rng(seed)
     graph = {'nodes': [], 'edges': [], 'objective': objective, 'goal': goal, 'stop': 'running'}
-    observations, papers, attempted = [], [], set()
+    observations, papers, deferred = [], [], {}
     searches, check_id = 0, None
 
     def node(kind, **data):
@@ -107,7 +114,7 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
                 'Predictive intervals are approximate; source reliability and applicability require assessment.')
     for step in range(budget):
         on_event('planning', graph)
-        options, gp = shortlist(X, observations, attempted, rng, direction)
+        options, gp = shortlist(X, observations, rng, direction)
         context = dict(objective=objective, goal=goal, parameters=names, options=[dict(o, params=dict(zip(names, X[o['candidate']].tolist())))
                                                   for o in options], history=observations)
         # Search once initially, once after a surprising result. A search must affect a future decision.
@@ -129,7 +136,8 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
         good = [o for o in observations if o['value'] is not None]
         # Spend the final attempt confirming the observed incumbent, not searching a new condition.
         if step == budget-1 and good and forced is None:
-            forced = max(good, key=lambda o:direction*o['value'])['candidate']
+            means = observed_means(good)
+            forced = max(means, key=lambda i:direction*means[i])
         default = forced if forced is not None else options[0]['candidate']
         reason = ('Repeat after a surprising result; response-model error and delivery error remain alternatives.'
                   if check_id is not None else 'Final confirmation of the best observed condition.'
@@ -147,9 +155,12 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
         selected = decision['selected']
         d = node('decision', round=step+1, **decision, options=context['options'])
         edge(root if not observations else observations[-1]['id'], d, 'Evidence available before selection.')
+        for prior in deferred.pop(selected, []):
+            edge(prior, d, 'Reconsidered and selected; the earlier deferral was not a refutation.')
         branch_nodes = {selected:d}
         for i, why in decision['alternatives'].items():
             a = node('deferred', candidate=int(i), reason=why, status='Reconsiderable; not falsified.')
+            deferred.setdefault(int(i), []).append(a)
             branch_nodes[int(i)] = a
             edge(d, a, 'Not selected in this round.')
         for citation in decision['citations']:
@@ -166,7 +177,6 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
         observation['id'] = oid
         edge(d, oid, 'Executed this decision.')
         observations.append(observation)
-        attempted.add(selected)
         check_id = None
         if gp is not None and observation['value'] is not None and forced is None:
             train = [direction*o['value'] for o in observations[:-1] if o['value'] is not None]
@@ -182,14 +192,11 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
             break
     if graph['stop'] == 'running':
         graph['stop'] = 'budget exhausted'
-    grouped = {}
-    for o in observations:
-        if o['value'] is not None:
-            grouped.setdefault(o['candidate'], []).append(o['value'])
-    best = max(grouped, key=lambda i:direction*np.mean(grouped[i])) if grouped else None
+    means = observed_means(observations)
+    best = max(means, key=lambda i:direction*means[i]) if means else None
     result = dict(candidate=best, params=None if best is None else dict(zip(names, X[best].tolist())),
-                  mean=None if best is None else float(np.mean(grouped[best])),
-                  repeats=0 if best is None else len(grouped[best]),
+                  mean=None if best is None else means[best],
+                  repeats=sum(o['candidate']==best and o['value'] is not None for o in observations),
                   rule=f'{goal.capitalize()} mean observed proxy by intended parameters, including repeats.',
                   uncertainty='Best observed proxy, not a verified objective or proven optimum. '
                   'One confirmation cannot establish reproducibility.')

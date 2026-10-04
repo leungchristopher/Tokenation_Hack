@@ -120,3 +120,41 @@ def test_minimise_proxy_without_oracle():
         objective='unverified reviewer loss'))
     assert episode['result']['params'] == {'x':0.0}
     assert 'not a verified objective' in episode['result']['uncertainty']
+
+
+def test_measured_non_incumbent_can_be_reconsidered(monkeypatch):
+    from minimal_lab import loop
+    class GP:
+        def __init__(self, **kwargs): pass
+        def fit(self, X, y): return self
+        def predict(self, X, return_std=False):
+            mu, sd = np.array([0., 2., 0.]), np.array([1., 10., 1.])
+            return (mu, sd) if return_std else mu
+    monkeypatch.setattr(loop, 'GaussianProcessRegressor', GP)
+    observations = [dict(candidate=i, value=v, reported=[float(i)], report_sd=[0.])
+                    for i,v in enumerate([10., 1., 2.])]
+    options, _ = loop.shortlist(np.array([[0.],[1.],[2.]]), observations, np.random.default_rng(0))
+    assert {o['candidate'] for o in options} >= {0, 1}
+
+
+@pytest.mark.parametrize('goal,sign', [('maximize',1), ('minimize',-1)])
+def test_deferral_revisited_and_confirmation_uses_mean(monkeypatch, goal, sign):
+    from minimal_lab import loop
+    options = [dict(candidate=i, mean=None, sd=None, ei=None, reason='Test option') for i in (0,1)]
+    monkeypatch.setattr(loop, 'shortlist', lambda *args: (options.copy(), None))
+    selections, results = iter([0,0,1]), iter([10.,2.,8.,8.])
+    async def choose(context):
+        pick = next(selections)
+        return dict(selected=pick,reason='Test selection',uncertainty='Uncertain response',
+                    alternatives={str(1-pick):'Deferred until further measurements.'},citations=[])
+    def execute(params):
+        return dict(value=sign*next(results),reported=[params['x']],ok=True)
+    episode = asyncio.run(loop.run(np.array([[0.],[1.]]), ['x'], execute,
+                                   budget=4, goal=goal, choose=choose))
+    decisions = [n for n in episode['graph']['nodes'] if n['kind']=='decision']
+    assert decisions[-1]['selected'] == 1  # mean 8 beats mean 6, despite a single reading of 10
+    assert episode['result']['candidate'] == 1
+    assert episode['result']['repeats'] == 2
+    edges = episode['graph']['edges']
+    assert any(e['target']==decisions[2]['id'] and e['reason'].startswith('Reconsidered') for e in edges)
+    assert len(episode['observations']) == 4  # no prior observation was erased by a deferral

@@ -38,13 +38,18 @@ Each round:
 1. Fit a fixed Matern GP to observed rewards at reported inputs. Approximately propagate
    input-report uncertainty into response variance. These intervals are not calibrated.
 2. Shortlist highest expected improvement, highest predictive uncertainty and an incumbent
-   repeat. Deduplicate. The first round uses three seeded random candidates.
+   repeat. Previously measured conditions remain eligible. Deduplicate. The first round
+   uses three seeded random candidates.
 3. Optionally let an LLM choose within this shortlist, citing sources and explaining
    every deferred alternative. Invalid responses fall back to the numerical policy.
 4. Record the decision, then execute. A result outside the pre-update 2-SD interval
    schedules a diagnostic repeat. It does not identify the cause or refute a mechanism.
 5. Search at most twice: initially and after surprise. Reserve the last attempt for
    confirmation. Return the best mean observed proxy across intended settings and repeats.
+
+Deferral is local to a decision, not permanent pruning. A later selection links back
+to prior deferrals of that condition. Incumbent selection, final confirmation and final
+recommendation all use mean observed response. No evidence edge propagates closure.
 
 This bounds LLM influence, but it also limits literature guidance to shortlisted candidates.
 The graph is an inspectable decision record, not proof that generated reasons are faithful
