@@ -1,0 +1,17 @@
+<!doctype html><meta charset="utf-8"><title>Experiment decisions</title>
+<style>
+body{margin:0;background:#f5f4ef;color:#202824;font:15px system-ui}header{padding:24px;border-bottom:1px solid #ccc}h1{font-size:23px;margin:0 0 8px}main{display:grid;grid-template-columns: minmax(320px,1fr) minmax(320px,1fr);height:80vh}#tree{overflow:auto;padding:24px}#detail{overflow:auto;padding:24px;background:#fff}button{display:block;width:100%;text-align:left;border:1px solid #bbb;background:white;border-radius:5px;margin:10px 0;padding:14px;cursor:pointer;font:inherit}button:hover{border-color:#175844}.deferred{margin-left:30px;width:calc(100% - 30px);background:#eee;color:#555}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px ui-monospace}small{color:#59635d}a{color:#175844}@media(max-width:700px){main{display:block;height:auto}}
+</style>
+<header><h1>Experiment decisions</h1><span id="summary"></span><br><small>Select a decision to inspect its alternatives, evidence, uncertainty and result.</small></header>
+<main><section id="tree"></section><section id="detail"></section></main>
+<script>
+const graph=GRAPH_DATA;
+const tree=document.querySelector('#tree'), detail=document.querySelector('#detail');
+const result=graph.nodes.find(n=>n.kind==='recommendation');
+document.querySelector('#summary').textContent=(result?.candidate==null?'No valid result':`Best observed protocol: C${result.candidate} · mean ${result.mean.toPrecision(4)} · ${result.repeats} measurement(s)`)+` · ${graph.stop}`;
+function show(n){detail.replaceChildren();const h=document.createElement('h2');h.textContent=n.kind+(n.round?` · round ${n.round}`:'');detail.append(h);const pre=document.createElement('pre');pre.textContent=JSON.stringify(n,null,2);detail.append(pre);
+for(const e of graph.edges.filter(e=>e.source===n.id||e.target===n.id)){const other=graph.nodes.find(m=>m.id===(e.source===n.id?e.target:e.source));const b=document.createElement('button');b.textContent=`${e.reason} → ${other.kind} ${other.id}`;b.onclick=()=>show(other);detail.append(b)}
+if(n.url&&/^https:\/\//.test(n.url)){const a=document.createElement('a');a.href=n.url;a.textContent='Open source';a.target='_blank';a.rel='noopener noreferrer';detail.append(a)}}
+for(const n of graph.nodes.filter(n=>['goal','decision','deferred','recommendation','search_failure'].includes(n.kind))){const b=document.createElement('button');b.className=n.kind;b.textContent=(n.round?`Round ${n.round} · `:'')+(n.kind==='decision'?`C${n.selected} · ${n.reason}`:n.kind==='deferred'?`C${n.candidate} · ${n.reason}`:n.reason||n.rule);b.onclick=()=>show(n);tree.append(b)}
+show(result||graph.nodes[0]);
+</script>

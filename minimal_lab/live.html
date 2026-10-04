@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Inquiry · live experiment</title>
+<style>
+:root{font:15px system-ui;color:#23312f;background:#f3f3ee}*{box-sizing:border-box}body{margin:0}header{display:flex;align-items:center;justify-content:space-between;padding:20px 28px;border-bottom:1px solid #d4dad4}h1{font-size:22px;margin:0}h2{font-size:16px;margin:0 0 12px}h3{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:#64716b;margin:20px 0 8px}p{line-height:1.5;margin:8px 0}small,.muted{color:#64716b}button,a.button{background:#1c6556;color:white;border:0;border-radius:5px;padding:10px 16px;font:inherit;cursor:pointer;text-decoration:none}button:disabled{opacity:.5;cursor:default}#follow{background:white;color:#1c6556;border:1px solid #d4dad4;padding:5px 10px;font-size:13px}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:20px 28px}.stat{border-left:2px solid #bbc9bf;padding-left:12px}.stat strong{display:block;font-size:25px;margin-top:5px}main{padding:0 28px 28px;display:grid;grid-template-columns:1fr 1fr;gap:18px}.panel{background:white;border:1px solid #d4dad4;border-radius:8px;overflow:hidden}.bar{padding:15px 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e6e9e4}#robot{width:100%;display:block;aspect-ratio:4/3;object-fit:contain;background:#e9ede7}#action{padding:12px 18px;min-height:48px}.graph-scroll{height:480px;overflow:auto;background:#fafbf8}#graph{width:100%;min-width:540px;display:block}.node{cursor:pointer}.node:hover rect{stroke:#163f36;stroke-width:2}.node text{font-size:12px;fill:#23312f}.edge{fill:none;stroke:#aabbb0;stroke-width:1.3}.deferred-edge{stroke-dasharray:4 4}.details{grid-column:1/-1;padding:22px;display:grid;grid-template-columns:1fr 1fr;gap:26px}table{border-collapse:collapse;width:100%;font-size:13px}th,td{text-align:left;border-bottom:1px solid #e6e9e4;padding:8px 5px}th{font-weight:500;color:#64716b}.note{border-left:3px solid #bf9d64;background:#fbf7ed;padding:10px 14px}.evidence{border-top:1px solid #ddd;padding-top:10px}a{color:#1c6556}#error{display:none;background:#fff0e9;padding:14px 28px;color:#872e16}#download{display:none}#progress{width:100%;height:85px}footer{padding:0 28px 25px;color:#64716b;font-size:12px}@media(max-width:850px){main{grid-template-columns:1fr}.details{grid-template-columns:1fr}.stats{gap:8px}.stat strong{font-size:20px}header{gap:12px}.graph-scroll{height:350px}}
+</style>
+<header><div><h1>Inquiry / live experiment</h1><small id="status">Connecting</small></div><div><a id="download" class="button" href="/result.json" download="protocol.json">Save protocol</a> <button id="run">Run experiment loop</button></div></header>
+<div id="error" role="alert"></div>
+<section class="stats"><div class="stat"><small>Experiments completed</small><strong id="count">0</strong></div><div class="stat"><small>Best observed mean</small><strong id="best">—</strong></div><div class="stat"><small>Current stage</small><strong id="stage">Ready</strong></div></section>
+<main><section class="panel"><div class="bar"><h2>Robot execution</h2><small>MuJoCo · live physics</small></div><img id="robot" alt="Live robot simulation" hidden><div id="action">Start a run to watch the robot execute each selected protocol.</div><svg id="progress" aria-label="Observed assay results over experiments"></svg></section>
+<section class="panel"><div class="bar"><h2>Decision graph</h2><button id="follow">Follow live</button></div><div class="graph-scroll"><svg id="graph" role="img" aria-label="Clickable experiment decision graph"></svg></div></section>
+<section class="panel details"><div id="reason"><h2>Why this experiment?</h2><p>The decision appears before the robot moves.</p></div><div id="evidence"><h2>Evidence and uncertainty</h2><p>Selected and deferred branches retain their reasons. A deferred branch remains open to reconsideration.</p></div></section></main>
+<footer>Volume error and delivery reports are simulated, not liquid physics. Source labels denote scene slots. Best observed assay response does not verify an underlying objective. GP uncertainty is approximate.</footer>
+<script>
+const $=id=>document.getElementById(id), NS='http://www.w3.org/2000/svg';
+let graph=null,pinned=null,revision=-1,frame=-1;
+const number=v=>v==null?'—':Number(v).toPrecision(4);
+function el(tag,text,parent,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;parent.append(e);return e}
+function svg(tag,attrs,parent,text){const e=document.createElementNS(NS,tag);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!=null)e.textContent=text;parent.append(e);return e}
+function table(parent,headers,rows){const t=el('table',null,parent),head=el('tr',null,t);headers.forEach(h=>el('th',h,head));for(const row of rows){const tr=el('tr',null,t);row.forEach(v=>el('td',v,tr))}}
+function show(id){const n=graph.nodes.find(n=>n.id===id);if(!n)return;
+  const a=$('reason'),b=$('evidence');a.replaceChildren();b.replaceChildren();
+  el('h2',n.kind==='decision'?`Round ${n.round} · choose C${n.selected}`:n.kind==='observation'?`Round ${n.round} · observed ${number(n.value)}`:n.kind==='recommendation'?'Recommended protocol':n.kind==='deferred'?`C${n.candidate} · deferred`:n.title||n.kind,a);
+  el('p',n.reason||n.rule||n.abstract||'',a);el('p',n.uncertainty||n.status||'No independent confidence estimate is available.',b,'note');
+  if(n.fallback)el('p',`LLM selection failed (${n.fallback}); numerical policy used.`,b,'note');
+  if(n.surprise)el('p',n.surprise,b,'note');
+  if(n.options){table(a,['Candidate','Predicted','SD','EI'],n.options.map(o=>['C'+o.candidate,number(o.mean),number(o.sd),number(o.ei)]));
+    const chosen=n.options.find(o=>o.candidate===n.selected);if(chosen){el('h3','Intended settings',a);table(a,['Parameter','Setting'],Object.entries(chosen.params).map(([k,v])=>[k,number(v)]))}
+    el('h3','Deferred alternatives',a);for(const [c,why]of Object.entries(n.alternatives))el('p',`C${c}: ${why}`,a);}
+  if(n.intended&&n.reported){el('h3','Delivery report',a);table(a,['Parameter','Intended','Reported','Report SD'],Object.entries(n.intended).map(([k,v],i)=>[k,number(v),number(n.reported[i]),number(n.report_sd[i])]))}
+  if(n.params){table(a,['Parameter','Setting'],Object.entries(n.params).map(([k,v])=>[k,number(v)]));el('p',`${n.repeats} measurement(s) · mean ${number(n.mean)}`,a)}
+  const related=graph.edges.filter(e=>e.target===n.id||e.source===n.id);
+  const sourceIds=new Set(related.map(e=>e.source).filter(id=>graph.nodes.find(x=>x.id===id)?.kind==='source'));
+  if(n.kind==='source')sourceIds.add(n.id);
+  el('h3','Literature attribution',b);
+  if(!sourceIds.size)el('p','No literature source is attached to this node.',b);
+  for(const sid of sourceIds){const s=graph.nodes.find(x=>x.id===sid),box=el('div',null,b,'evidence');
+    if(/^https:\/\//.test(s.url||'')){const link=el('a',s.title||sid,box);link.href=s.url;link.target='_blank';link.rel='noopener noreferrer'}else el('p',s.title||sid,box);
+    const citations=graph.nodes.flatMap(x=>x.citations||[]).filter(c=>c.id===sid&&(c.candidate===(n.selected??n.candidate)||n.kind==='source'));
+    for(const c of citations){el('p',`“${c.quote}”`,box);el('p',c.transfer_limit,box,'muted')}
+    for(const e of related.filter(e=>e.source===sid))el('p',e.reason,box,'muted');}
+  el('h3','Connected evidence',b);for(const e of related.filter(e=>!sourceIds.has(e.source))){const id=e.source===n.id?e.target:e.source;const link=el('a',`${e.reason} (${id})`,el('p',null,b));link.href='#';link.onclick=event=>{event.preventDefault();pinned=id;show(id)}}
+}
+function draw(){const canvas=$('graph');canvas.replaceChildren();const positions={};let rounds=0,source=0;
+  for(const n of graph.nodes){if(n.kind==='goal')positions[n.id]=[275,25];else if(n.kind==='source'||n.kind==='search_failure')positions[n.id]=[15,90+source++*65];else if(n.kind==='decision'){positions[n.id]=[275,90+(n.round-1)*190];rounds=n.round}else if(n.kind==='observation')positions[n.id]=[275,180+(n.round-1)*190];else if(n.kind==='recommendation')positions[n.id]=[275,110+rounds*190]}
+  for(const n of graph.nodes.filter(n=>n.kind==='deferred')){const edge=graph.edges.find(e=>e.target===n.id),siblings=graph.edges.filter(e=>e.source===edge.source&&graph.nodes.find(n=>n.id===e.target)?.kind==='deferred');positions[n.id]=[535,positions[edge.source][1]+siblings.findIndex(e=>e.target===n.id)*56]}
+  const height=Math.max(300,...Object.values(positions).map(p=>p[1]+70));canvas.setAttribute('viewBox',`0 0 735 ${height}`);
+  for(const e of graph.edges){const from=positions[e.source],to=positions[e.target];if(!from||!to)continue;const x=from[0]+85,y=from[1]+38,tx=to[0]+85,ty=to[1];svg('path',{d:`M${x},${y} C${x},${(y+ty)/2} ${tx},${(y+ty)/2} ${tx},${ty}`,class:'edge'+(to[0]===535?' deferred-edge':'')},canvas)}
+  for(const n of graph.nodes){const p=positions[n.id];if(!p)continue;const g=svg('g',{class:'node',tabindex:0,role:'button','aria-label':n.kind+' '+n.id},canvas);const colour=n.kind==='decision'?'#deeee5':n.kind==='observation'?'#e6edf3':n.kind==='recommendation'?'#cce3d5':n.kind==='source'?'#f3ead7':'#f1f2ed';svg('rect',{x:p[0],y:p[1],width:180,height:40,rx:5,fill:colour,stroke:'#c3cec5'},g);
+    const label=n.kind==='decision'?`R${n.round} · choose C${n.selected}`:n.kind==='observation'?`Observed ${number(n.value)}`:n.kind==='deferred'?`C${n.candidate} · deferred`:n.kind==='source'?`Source ${n.id}`:n.kind==='recommendation'?`Recommend C${n.candidate}`:n.kind;
+    svg('text',{x:p[0]+10,y:p[1]+25},g,label);svg('title',{},g,n.reason||n.title||n.uncertainty||'');g.onclick=()=>{pinned=n.id;show(n.id)};g.onkeydown=e=>{if(e.key==='Enter')g.onclick()};}
+  const latest=graph.nodes.filter(n=>['decision','observation','recommendation'].includes(n.kind)).at(-1);show(pinned||latest?.id||graph.nodes[0].id);
+  if(!pinned){const pane=canvas.parentElement;pane.scrollTop=pane.scrollHeight;}
+  const obs=graph.nodes.filter(n=>n.kind==='observation'&&n.value!=null),groups={};for(const o of obs)(groups[o.candidate]??=[]).push(o.value);
+  const means=Object.values(groups).map(v=>v.reduce((a,b)=>a+b,0)/v.length);$('best').textContent=means.length?number((graph.goal==='minimize'?Math.min:Math.max)(...means)):'—';
+  const plot=$('progress');plot.replaceChildren();plot.setAttribute('viewBox','0 0 600 85');if(obs.length){const lo=Math.min(...obs.map(o=>o.value)),span=Math.max(1,Math.max(...obs.map(o=>o.value))-lo),points=obs.map((o,i)=>[30+i*540/Math.max(1,obs.length-1),65-(o.value-lo)/span*45]);svg('polyline',{points:points.map(p=>p.join(',')).join(' '),fill:'none',stroke:'#5b8f7b','stroke-width':2},plot);points.forEach((p,i)=>{const dot=svg('circle',{cx:p[0],cy:p[1],r:4,fill:'#1c6556'},plot);svg('title',{},dot,`Round ${obs[i].round}: ${obs[i].value}`)});svg('text',{x:30,y:14,fill:'#64716b','font-size':11},plot,'Observed assay response by experiment');}
+}
+$('run').onclick=async()=>{const response=await fetch('/run',{method:'POST'});if(response.ok){pinned=null;$('run').disabled=true}else if(response.status!==409){$('error').style.display='block';$('error').textContent='Could not start the run.'}};
+$('follow').onclick=()=>{pinned=null;if(graph)draw()};
+async function poll(){try{const s=await(await fetch('/state')).json();$('status').textContent=`${s.mode} · ${s.status} · assumed volume CV ${s.cv}`;$('stage').textContent=s.action||s.phase;$('run').disabled=s.status==='running';$('download').style.display=s.download?'inline-block':'none';$('error').style.display=s.error?'block':'none';$('error').textContent=s.error||'';
+  if(s.frame_id!==frame&&s.frame_id>0){frame=s.frame_id;$('robot').hidden=false;$('robot').src='/frame.jpg?v='+frame}
+  if(s.revision!==revision){revision=s.revision;const t=s.transfer;$('action').textContent=s.action?`${s.action}${t?.role?' · '+t.role:''}${t?.volume_ul?' · '+number(t.volume_ul)+' µL':''}${t?.well?' → '+t.well:''}`:s.phase==='complete'?'Protocol selected. Inspect the recommendation and supporting observations.':s.phase;
+    graph=s.graph;if(graph){$('count').textContent=graph.nodes.filter(n=>n.kind==='observation').length+' / '+s.budget;draw()}else{$('graph').replaceChildren();$('count').textContent='0 / '+s.budget;$('best').textContent='—'}
+    if(s.scores){$('status').textContent+=' · Inspect: '+Object.entries(Object.values(s.scores)[0]).map(([k,v])=>`${k} ${number(v)}`).join(' · ');}}
+}catch(e){$('status').textContent='Connection lost. Check the local demo server.'}finally{setTimeout(poll,250)}}poll();
+</script></html>
