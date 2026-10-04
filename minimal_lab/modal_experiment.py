@@ -106,6 +106,8 @@ def summary(base, model, calls, meta):
                 cited_valid_decisions=sum(r['cited'] for r in model),
                 prompt_tokens=sum(c.get('prompt_tokens') or 0 for c in calls),
                 completion_tokens=sum(c.get('completion_tokens') or 0 for c in calls),
+                cache_read_tokens=sum(c.get('cache_read_tokens') or 0 for c in calls),
+                cache_write_tokens=sum(c.get('cache_write_tokens') or 0 for c in calls),
                 latency_s=dict(mean=float(np.mean(lat)), p50=float(np.median(lat)), max=float(max(lat))) if lat else None,
                 numerical_runs=base, model_runs=model)
 
@@ -126,8 +128,11 @@ async def inspect_arm(args, base):
     async def generate(prompt):
         start = time.monotonic()
         out = await llm.generate(prompt, config=config)
-        calls.append(dict(latency_s=time.monotonic()-start, prompt_tokens=out.usage.input_tokens,
-                          completion_tokens=out.usage.output_tokens))
+        usage = out.usage
+        calls.append(dict(latency_s=time.monotonic()-start, prompt_tokens=usage and usage.input_tokens,
+                          completion_tokens=usage and usage.output_tokens,
+                          cache_read_tokens=usage and usage.input_tokens_cache_read,
+                          cache_write_tokens=usage and usage.input_tokens_cache_write))
         return dict(text=out.completion)
     start = time.monotonic()
     runs = list(await asyncio.gather(*[episode(s, args.budget, args.cv, text_chooser(generate),
