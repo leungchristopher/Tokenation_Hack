@@ -13,7 +13,7 @@
 <footer>Volume error and delivery reports are simulated, not liquid physics. Source labels denote scene slots. Best observed assay response does not verify an underlying objective. GP uncertainty is approximate.</footer>
 <script>
 const $=id=>document.getElementById(id), NS='http://www.w3.org/2000/svg';
-let graph=null,pinned=null,revision=-1,frame=-1,zoom=1;
+let graph=null,pinned=null,revision=-1,frame=-1;
 const number=v=>v==null?'—':Number(v).toPrecision(4);
 function el(tag,text,parent,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;parent.append(e);return e}
 function svg(tag,attrs,parent,text){const e=document.createElementNS(NS,tag);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!=null)e.textContent=text;parent.append(e);return e}
@@ -76,7 +76,7 @@ function draw(){const canvas=$('graph');canvas.replaceChildren();const positions
       const two=n.kind==='decision'||n.kind==='deferred'||n.surprise;
       svg('text',{x:p[0]+10,y:p[1]+(two?16:25)},g,label);
       if(n.surprise)svg('text',{x:p[0]+10,y:p[1]+32,class:'badge cite'},g,'surprise — outside 2-SD interval');
-      else if(two){const cites=(n.cited||[]).length||(n.citations||[]).length;svg('text',{x:p[0]+10,y:p[1]+32,class:'badge '+(cites?'cite':'mute')},g,cites?`${cites} source(s) cited`:'no sources cited')}}
+      else if(two){const cites=(n.citations||[]).length||(n.cited||[]).length;svg('text',{x:p[0]+10,y:p[1]+32,class:'badge '+(cites?'cite':'mute')},g,cites?`${cites} source(s) cited`:'no sources cited')}}
     svg('title',{},g,n.reason||n.title||n.uncertainty||'');g.onclick=()=>{pinned=n.id;show(n.id)};g.onkeydown=e=>{if(e.key==='Enter')g.onclick()};}
   const lg=$('legend');lg.replaceChildren();
   el('div',null,lg).innerHTML='<b>Nodes:</b> decision · deferred · observation · recommendation · <span style="color:#a9711f;font-weight:600">source</span> (dashed border = never cited) · amber = surprise flag &nbsp; <b>Edges:</b><span class="sw"></span>flow<span class="sw cite"></span>cited support<span class="sw ret"></span>retrieved only<span class="sw recon"></span>reconsidered';
@@ -87,7 +87,7 @@ function draw(){const canvas=$('graph');canvas.replaceChildren();const positions
   const means=Object.values(groups).map(v=>v.reduce((a,b)=>a+b,0)/v.length);$('best').textContent=means.length?number((graph.goal==='minimize'?Math.min:Math.max)(...means)):'—';
   const plot=$('progress');plot.replaceChildren();plot.setAttribute('viewBox','0 0 600 85');if(obs.length){const lo=Math.min(...obs.map(o=>o.value)),span=Math.max(1,Math.max(...obs.map(o=>o.value))-lo),points=obs.map((o,i)=>[30+i*540/Math.max(1,obs.length-1),65-(o.value-lo)/span*45]);svg('polyline',{points:points.map(p=>p.join(',')).join(' '),fill:'none',stroke:'#5b8f7b','stroke-width':2},plot);points.forEach((p,i)=>{const dot=svg('circle',{cx:p[0],cy:p[1],r:4,fill:'#1c6556'},plot);svg('title',{},dot,`Round ${obs[i].round}: ${obs[i].value}`)});svg('text',{x:30,y:14,fill:'#64716b','font-size':11},plot,'Observed assay response by experiment');}
 }
-function setZoom(f){zoom=Math.min(4,Math.max(.6,zoom*f));$('graph').style.minWidth=Math.round(540*zoom)+'px'}
+function setZoom(f){const c=$('graph');const w=Math.min(2160,Math.max(270,c.getBoundingClientRect().width*f));c.style.minWidth=c.style.width=Math.round(w)+'px'}
 $('zin').onclick=()=>setZoom(1.3);$('zout').onclick=()=>setZoom(1/1.3);
 $('run').onclick=async()=>{const response=await fetch('/run',{method:'POST'});if(response.ok){pinned=null;$('run').disabled=true}else if(response.status!==409){$('error').style.display='block';$('error').textContent='Could not start the run.'}};
 $('follow').onclick=()=>{pinned=null;if(graph)draw()};
