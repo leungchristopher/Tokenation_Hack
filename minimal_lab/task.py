@@ -59,18 +59,23 @@ Give a reason for EVERY unselected candidate. No new candidates or numerical con
 
 
 @solver
-def demo_solver(budget=12, seed=0, literature=False, llm=False, cv=0.15, out='logs/minimal'):
+def demo_solver(budget=12, seed=0, literature=False, llm=False, cv=0.15, out='logs/minimal',
+                on_event=lambda stage, graph: None, lab_factory=Lab):
     async def solve(state, generate):
         env = get_env('upo_abts')
-        lab = Lab(env, seed=seed, cv=cv)
-        episode = await run(env.X.copy(), env.params, lab, budget=budget, seed=seed,
-                            objective='simulated UPO-ABTS assay response',
-                            research=search if literature else None, choose=choose if llm else None)
+        lab = lab_factory(env, seed=seed, cv=cv)
+        try:
+            episode = await run(env.X.copy(), env.params, lab, budget=budget, seed=seed,
+                                objective='simulated UPO-ABTS assay response', on_event=on_event,
+                                research=search if literature else None, choose=choose if llm else None)
+        finally:
+            getattr(lab, 'close', lambda: None)()
         if episode['result']['params'] is not None:
             episode['result']['execution_protocol'] = lab.protocol(episode['result']['params'])
             episode['graph']['nodes'][-1].update(episode['result'])
         directory = Path(out)/f'{state.sample_id}-epoch{state.epoch}'
         save(episode, directory)
+        on_event('saved', episode['graph'])
         state.metadata['minimal_episode'] = episode
         state.output.completion = json.dumps(episode['result'])
         state.completed = True

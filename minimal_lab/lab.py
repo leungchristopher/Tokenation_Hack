@@ -9,13 +9,15 @@ import numpy as np
 
 
 class Lab:
-    def __init__(self, env, seed=0, cv=0.15, report_cv=0.05, backend=None):
+    def __init__(self, env, seed=0, cv=0.15, report_cv=0.05, backend=None,
+                 on_action=lambda action, detail: None):
         if not np.isfinite([cv, report_cv]).all() or min(cv, report_cv) < 0:
             raise ValueError('Volume error scales must be finite and nonnegative.')
         if backend is None:
             from harness.tools.lab_backend import LabBackend
             backend = LabBackend(seed=seed)
         self.backend, self.env = backend, env
+        self.on_action = on_action
         self.cv, self.report_cv = cv, report_cv
         self.delivery_rng, self.report_rng, self.assay_rng = [np.random.default_rng(s)
             for s in np.random.SeedSequence(seed).spawn(3)]
@@ -48,6 +50,7 @@ class Lab:
         self.count += 1
         motion, volumes = [], {}
         for transfer in plan['transfers']:
+            self.on_action('change tip', dict(well=well, **transfer))
             if self.backend.skills.tip_status()['tips_remaining'] == 0:
                 # Automatic stock replacement is an upstream abstraction, not robot motion.
                 self.backend.refresh_tips()
@@ -55,6 +58,7 @@ class Lab:
             changed = self.backend.change_tip()
             if not changed['ok']:
                 return dict(value=None, ok=False, reason=changed['reason'], reported=None, motion=motion)
+            self.on_action('pipette', dict(well=well, **transfer))
             out = self.backend.pipette(transfer['source'], well)
             moves = [dict(action=a, site=s, **asdict(r)) for a,s,r in out.get('moves', [])]
             motion.append(dict(role=transfer['role'], moves=moves))
@@ -63,6 +67,7 @@ class Lab:
             # Mean-one lognormal volume error, CV parameterised exactly. Independent of motion.
             sigma = np.sqrt(np.log1p(self.cv**2))
             volumes[transfer['role']] = transfer['volume_ul']*self.delivery_rng.lognormal(-sigma*sigma/2, sigma)
+        self.on_action('mix', dict(well=well))
         mixed = self.backend.mix(well, cycles=2)
         motion.append(dict(action='mix', **mixed))
         if not mixed['ok']:
@@ -77,6 +82,7 @@ class Lab:
         for p in self.slots:
             report_sd[p] = abs(realised[p])*self.report_cv
             reported[p] = max(0.0, self.report_rng.normal(realised[p], report_sd[p]))
+        self.on_action('measure', dict(well=well))
         index = self.env.index(realised)
         value = self.env.sample(index, self.assay_rng)
         self.hidden.append(dict(realised=realised, mapped_candidate=index, volumes=volumes))

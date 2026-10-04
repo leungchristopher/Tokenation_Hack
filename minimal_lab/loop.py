@@ -79,7 +79,7 @@ def validate_choice(reply, options, papers):
 
 
 async def run(X, names, execute, *, objective='observed reward proxy', goal='maximize',
-              budget=12, seed=0, research=None, choose=None):
+              budget=12, seed=0, research=None, choose=None, on_event=lambda stage, graph: None):
     """execute(params) -> public observation. research/choose only receive public context."""
     if goal not in ('maximize', 'minimize'):
         raise ValueError('goal must be maximize or minimize.')
@@ -90,7 +90,7 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
         raise ValueError('One distinct parameter name per candidate column is required.')
     direction = 1 if goal == 'maximize' else -1
     rng = np.random.default_rng(seed)
-    graph = {'nodes': [], 'edges': [], 'objective': objective, 'goal': goal, 'stop': 'budget exhausted'}
+    graph = {'nodes': [], 'edges': [], 'objective': objective, 'goal': goal, 'stop': 'running'}
     observations, papers, attempted = [], [], set()
     searches, check_id = 0, None
 
@@ -106,11 +106,13 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
                 uncertainty='Optimisation of an observed proxy does not verify the underlying objective. '
                 'Predictive intervals are approximate; source reliability and applicability require assessment.')
     for step in range(budget):
+        on_event('planning', graph)
         options, gp = shortlist(X, observations, attempted, rng, direction)
         context = dict(objective=objective, goal=goal, parameters=names, options=[dict(o, params=dict(zip(names, X[o['candidate']].tolist())))
                                                   for o in options], history=observations)
         # Search once initially, once after a surprising result. A search must affect a future decision.
         if research and searches < 2 and (searches == 0 or check_id is not None):
+            on_event('research', graph)
             searches += 1
             try:
                 found = await research(context)
@@ -157,6 +159,7 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
             if paper['id'] not in {c['id'] for c in decision['citations']}:
                 edge(paper['id'], d, 'Retrieved but not cited as a selection reason.')
         # Decision is committed before execution. No result can rewrite its rationale.
+        on_event('decision', graph)
         observation = execute(dict(zip(names, X[selected].tolist())))
         observation.update(candidate=selected)
         oid = node('observation', round=step+1, **observation)
@@ -173,9 +176,12 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
             if residual > 2*sd[0]*max(np.std(train),1):
                 check_id = selected
                 graph['nodes'][int(oid[1:])]['surprise'] = 'Outside pre-update 2-SD predictive interval; repeat before interpretation.'
+        on_event('observation', graph)
         if not observation.get('ok', True):
             graph['stop'] = 'Execution failed; no reward fabricated.'
             break
+    if graph['stop'] == 'running':
+        graph['stop'] = 'budget exhausted'
     grouped = {}
     for o in observations:
         if o['value'] is not None:
@@ -191,6 +197,7 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
     for o in observations:
         if o['candidate'] == best:
             edge(o['id'], final, 'Observed result used in the protocol mean.')
+    on_event('recommendation', graph)
     return dict(result=result, graph=graph, observations=observations)
 
 
