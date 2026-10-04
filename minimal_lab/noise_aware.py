@@ -101,7 +101,11 @@ def shortlist(X, observations, rng, direction=1):
 
 
 def recommend(X, observations, direction=1):
-    """Posterior-best measured condition (noise-aware alternative to the best raw mean)."""
+    """Posterior-best measured condition (noise-aware alternative to the best raw mean).
+
+    Limitation: replicates are grouped by INTENDED candidate. Under reported-input noise each
+    replicate's realised delivery differs, so a group's mean and scatter mix deliveries and
+    the noise estimate absorbs delivery error. Exact here (offline report_sd=0)."""
     model, info = fit(X, observations, direction)
     return info['ids'][int(np.argmax(model.latent(info['Z'][info['ids']])[0]))]
 
@@ -122,12 +126,24 @@ def black_box(env, seed):
     return execute
 
 
+def random_shortlist(X, observations, rng, direction=1):
+    """Same-loop random control (matches PR #11): one uniform unmeasured condition, no GP,
+    so no surprise repeats; the loop still spends its last call on final confirmation."""
+    seen = {o['candidate'] for o in observations}
+    pool = [i for i in range(len(X)) if i not in seen] or list(range(len(X)))
+    return [{'candidate': int(rng.choice(pool)), 'mean': None, 'sd': None, 'ei': None,
+             'reason': 'Uniform random unmeasured condition.'}], None
+
+
+POLICIES = {'noise_aware': shortlist, 'loop_random': random_shortlist}
+
+
 def run_loop(env, budget, seed, policy):
     execute = black_box(env, seed)
     goal = getattr(env, 'goal', 'maximize')
     episode = loop.run(env.X.copy(), env.params, execute, budget=budget, seed=seed, goal=goal)
-    if policy == 'noise_aware':
-        with mock.patch.object(loop, 'shortlist', shortlist):  # Scoped to this run only.
+    if policy in POLICIES:
+        with mock.patch.object(loop, 'shortlist', POLICIES[policy]):  # Scoped to this run only.
             episode = asyncio.run(episode)
     else:
         episode = asyncio.run(episode)
@@ -142,6 +158,7 @@ def run_loop(env, budget, seed, policy):
 
 
 def run_random(env, budget, seed):
+    """Unconstrained random: B distinct conditions, no final confirmation (not the loop protocol)."""
     execute = black_box(env, seed)
     ids = np.random.default_rng(seed).choice(len(env.X), min(budget, len(env.X)), replace=False)
     observations = [dict(execute(dict(zip(env.params, env.X[i].tolist()))), candidate=int(i)) for i in ids]
@@ -169,6 +186,9 @@ def paired(a, b):
                 'lower': int((d < -1e-12).sum()), 'ties': int((abs(d) <= 1e-12).sum()), 'higher': int((d > 1e-12).sum())}
 
 
+NAMES = ('baseline', 'noise_aware', 'loop_random', 'random_unconstrained')
+
+
 def benchmark(envs, seeds, budgets):
     from bo_eval.env import get_env
     rows: list[dict[str, Any]] = []
@@ -176,8 +196,8 @@ def benchmark(envs, seeds, budgets):
         env = get_env(name)
         for budget in budgets:
             for seed in seeds:
-                for policy in ('baseline', 'noise_aware', 'random'):
-                    obs, rec, extra = (run_random(env, budget, seed) if policy == 'random'
+                for policy in NAMES:
+                    obs, rec, extra = (run_random(env, budget, seed) if policy == 'random_unconstrained'
                                        else run_loop(env, budget, seed, policy))
                     rows.append(dict(env=name, budget=budget, seed=seed, policy=policy, recommended=int(rec),
                                      **score(env, rec, obs), **extra))
@@ -185,18 +205,19 @@ def benchmark(envs, seeds, budgets):
     for name in envs:
         for budget in budgets:
             cell = {p: [r for r in rows if (r['env'], r['budget'], r['policy']) == (name, budget, p)]
-                    for p in ('baseline', 'noise_aware', 'random')}
+                    for p in NAMES}
             metric = lambda p, k, cell=cell: [r[k] for r in cell[p]]
             policies: dict[str, dict[str, Any]] = {p: {k: float(np.mean(np.array(metric(p, k), float))) for k in
                 ('regret', 'found', 'unique', 'repeats', 'optimism', 'posterior_rec_regret')} for p in cell}
             entry: dict[str, Any] = {'env': name, 'budget': budget, 'n_seeds': len(seeds), 'policies': policies}
-            for p in ('baseline', 'noise_aware'):
+            for p in ('baseline', 'noise_aware', 'loop_random'):
                 entry['policies'][p]['repeat_kinds'] = {k: float(np.mean([r['repeat_kinds'][k] for r in cell[p]]))
                                                         for k in ('policy', 'diagnostic', 'final')}
                 entry['policies'][p]['surprises'] = float(np.mean(np.array(metric(p, 'surprises'), float)))
-            entry['paired_regret'] = {'noise_aware-baseline': paired(metric('noise_aware', 'regret'), metric('baseline', 'regret')),
-                                      'noise_aware-random': paired(metric('noise_aware', 'regret'), metric('random', 'regret')),
-                                      'baseline-random': paired(metric('baseline', 'regret'), metric('random', 'regret'))}
+            entry['paired_regret'] = {f'{a}-{b}': paired(metric(a, 'regret'), metric(b, 'regret')) for a, b in
+                                      (('noise_aware', 'baseline'), ('noise_aware', 'loop_random'),
+                                       ('baseline', 'loop_random'), ('noise_aware', 'random_unconstrained'),
+                                       ('baseline', 'random_unconstrained'))}
             summary.append(entry)
     return {'summary': summary, 'rows': rows}
 
@@ -216,17 +237,17 @@ def main():
         result = benchmark(a.envs, seeds, a.budgets)
     result['config'] = {'envs': a.envs, 'seeds': seeds, 'budgets': a.budgets, 'prior_noise': PRIOR_NOISE,
                             'prior_dof': PRIOR_DOF, 'noise_floor': NOISE_FLOOR, 'seconds': round(time.time()-start, 1)}
-    print(f"{'env':13} {'B':>3} {'policy':12} {'regret':>7} {'found':>5} {'uniq':>5} {'reps':>5} "
+    print(f"{'env':13} {'B':>3} {'policy':20} {'regret':>7} {'found':>5} {'uniq':>5} {'reps':>5} "
           f"{'pol/diag/fin':>14} {'surpr':>5} {'optim':>7} {'postRec':>7}")
     for s in result['summary']:
         for name, m in s['policies'].items():
             k = m.get('repeat_kinds')
             kinds = '/'.join(f'{k[x]:.1f}' for x in ('policy', 'diagnostic', 'final')) if k else '-'
-            print(f"{s['env']:13} {s['budget']:3} {name:12} {m['regret']:7.3f} {m['found']:5.2f} {m['unique']:5.1f} "
+            print(f"{s['env']:13} {s['budget']:3} {name:20} {m['regret']:7.3f} {m['found']:5.2f} {m['unique']:5.1f} "
                   f"{m['repeats']:5.1f} {kinds:>14} {m.get('surprises', float('nan')):5.1f} {m['optimism']:7.3f} "
                   f"{m['posterior_rec_regret']:7.3f}")
         for pair, d in s['paired_regret'].items():
-            print(f"  {pair:22} mean {d['mean']:+.3f} 95%CI [{d['ci95'][0]:+.3f}, {d['ci95'][1]:+.3f}] "
+            print(f"  {pair:33} mean {d['mean']:+.3f} 95%CI [{d['ci95'][0]:+.3f}, {d['ci95'][1]:+.3f}] "
                   f"lower/tie/higher {d['lower']}/{d['ties']}/{d['higher']}")
     print(f"{result['config']['seconds']} s")
     if a.out:
