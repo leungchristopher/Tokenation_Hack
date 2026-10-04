@@ -15,3 +15,20 @@ pip install -e .
 inspect eval bo_eval/task.py --model openai/gpt-4o -T solver=react -T budget=30 --epochs 5
 inspect eval bo_eval/task.py -T solver=bo --model mockllm/model
 ```
+
+## epistemic
+
+`epistemic` provides finite-candidate GP-EI for enzyme activity and drug survival, with optional literature-informed priors via `gated_ei`. Final selection is the greedy best observed result.
+
+The enzyme task uses its dataset-reported spread. The drug task uses 5% relative CV by default; this is a modelling choice because the dataset has no replicates. Set `noise_cv` to change it.
+
+```bash
+python -m epistemic run --task drug --budget 20
+python -m epistemic run --task drug --acquisition gated_ei --provider openai:<model> --max-searches 2
+inspect eval epistemic/inspect_task.py --model anthropic/claude-sonnet-4-20250514 \
+  -T task_name=drug -T provider=inspect -T acquisition=gated_ei -T max_searches=2
+```
+
+Custom domains pass a `(TaskSpec, Evaluator)` pair to `run_episode(config, domain=...)`. `TaskSpec` supplies the candidate space and objective; `Evaluator` owns hidden outcomes.
+
+Exports include `graph.html`, `graph.svg`, `actions.json`, `metrics.json`, and the `Episode.save` artifacts.
