@@ -7,7 +7,7 @@ from inspect_ai.util import store_as
 
 from bo_eval.env import get_env
 from bo_eval.state import BOState
-from bo_eval.tools import add_reasoning, bayes_opt_suggest, close_branch, run_experiment, submit, view_graph
+from bo_eval.tools import add_reasoning, bayes_opt_suggest, close_branch, run_experiment, set_prior, submit, view_graph
 from bo_eval.tools.bayes_opt import suggest
 from bo_eval.tools.experiment import run
 from bo_eval.tools.submit import submit_params
@@ -18,6 +18,11 @@ reasoning label. When the evidence shows a branch cannot contain the optimum, cl
 closed branches cannot be extended. Before submitting, every experiment you did not continue from must be
 closed with a reason explaining why it was not pursued. Keep the number of experiments small. When confident,
 call submit()."""
+
+PRIOR = """
+Before the first experiment, use set_prior to state where you expect the optimum to lie from your own domain
+knowledge of this system, with honest widths and the reasoning behind them. bayes_opt_suggest weights its
+suggestions by this prior. Revise it with set_prior when the results contradict it."""
 
 
 @solver
@@ -30,12 +35,13 @@ def init_bo(budget: int, seed: int = 0):
     return solve
 
 
-def llm_agent(bo: bool = True, graph: bool = True):
+def llm_agent(bo: bool = True, graph: bool = True, prior: bool = False):
     tools = [run_experiment()]
     tools += [bayes_opt_suggest()] if bo else []
+    tools += [set_prior()] if prior else []
     tools += [add_reasoning(), close_branch(), view_graph()] if graph else []
     agent = react(
-        prompt=INSTRUCTIONS,
+        prompt=INSTRUCTIONS + (PRIOR if prior else ""),
         tools=tools,
         submit=AgentSubmit(tool=submit(), answer_only=True),
     )
@@ -85,6 +91,7 @@ def _submit_best():
 
 SOLVERS = {
     "react": lambda: llm_agent(bo=True, graph=True),
+    "react_prior": lambda: llm_agent(bo=True, graph=True, prior=True),
     "react_no_bo": lambda: llm_agent(bo=False, graph=True),
     "react_no_graph": lambda: llm_agent(bo=True, graph=False),
     "bo": bo_baseline,

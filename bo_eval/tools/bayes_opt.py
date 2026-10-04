@@ -11,19 +11,37 @@ from bo_eval.env import get_env
 from bo_eval.state import BOState
 
 
-def suggest(n: int = 1, xi: float = 0.01, avoid_closed: bool = True) -> list[dict]:
-    """GP + expected improvement over all feasible, not-yet-run conditions."""
+def prior_weight(env, C: np.ndarray, belief: dict) -> np.ndarray:
+    """pi(x): product of Gaussians centred on the believed optimum, in normalised coordinates."""
+    logp = np.zeros(len(C))
+    for k, (best, width) in belief.items():
+        j = env.params.index(k)
+        x = env.encode(np.array([[best if i == j else 0.0 for i in range(len(env.params))]]))[0, j]
+        logp -= 0.5 * ((C[:, j] - x) / max(width, 1e-3)) ** 2
+    return np.exp(logp - logp.max())
+
+
+def suggest(n: int = 1, xi: float = 0.01, avoid_closed: bool = True, beta: float = 10.0) -> list[dict]:
+    """GP + expected improvement over all feasible, not-yet-run conditions.
+
+    If the LLM has set a prior, EI is weighted by pi(x)^(beta/n) (piBO, Hvarfner et al. 2022),
+    so domain knowledge dominates early and the GP takes over as data accumulates.
+    """
     s = store_as(BOState)
     env, exps = get_env(s.env), s.graph.experiments
     C = env.encode(env.X)
-    run_idx = [env.index(e.params) for e in exps]  # ty: ignore[invalid-argument-type]
+    pi = prior_weight(env, C, s.graph.priors[-1].belief) if s.graph.priors else None
+    run_idx = [env.index(e.params) for e in exps]
     mask = np.ones(len(C), bool)
     mask[run_idx] = False
 
     if len(exps) < 2:
         rng = np.random.default_rng([s.seed, len(exps), 1])
-        pick = rng.choice(np.flatnonzero(mask), size=n, replace=False)
-        return [{"params": env.condition(i), "reason": "random initial design"} for i in pick]
+        cand = np.flatnonzero(mask)
+        w = None if pi is None else pi[cand] / pi[cand].sum()
+        pick = rng.choice(cand, size=n, replace=False, p=w)
+        why = "random initial design" if pi is None else "initial design sampled from the prior"
+        return [{"params": env.condition(i), "reason": why} for i in pick]
 
     Xo = C[run_idx]
     sign = 1.0 if env.goal == "maximize" else -1.0
@@ -33,14 +51,16 @@ def suggest(n: int = 1, xi: float = 0.01, avoid_closed: bool = True) -> list[dic
     mu, sd = gp.predict(C, return_std=True)
     z = (mu - y.max() - xi) / np.maximum(sd, 1e-9)
     ei = (mu - y.max() - xi) * norm.cdf(z) + sd * norm.pdf(z)
+    acq = ei if pi is None else ei * pi ** (beta / len(exps))
 
     if avoid_closed:
         nearest = ((C[:, None, :] - Xo[None]) ** 2).sum(-1).argmin(1)
         mask &= ~np.array([exps[j].closed for j in nearest])
-    order = [i for i in np.argsort(-ei) if mask[i]][:n]
+    order = [i for i in np.argsort(-acq) if mask[i]][:n]
     return [
         {"params": env.condition(i), "predicted_mean": float(sign * mu[i]),
-         "predicted_sd": float(sd[i]), "expected_improvement": float(ei[i])}
+         "predicted_sd": float(sd[i]), "expected_improvement": float(ei[i]),
+         **({} if pi is None else {"prior_weight": float(pi[i])})}
         for i in order
     ]
 
