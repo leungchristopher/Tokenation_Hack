@@ -6,9 +6,10 @@ expected improvement (piBO, Hvarfner et al. 2022, arXiv:2204.11051):
     acquisition = EI(x) * max(pi(x), eps) ** (gate * beta / n)
 
 `beta / n` decays the prior with the number n of observations, `eps` bounds its log-influence,
-and `gate` in [0, 1] is the one-sided Fisher-z confidence that observed responses rank the
-same way as log pi (Spearman, m unique observed conditions). Disagreeing data drives the gate
-to 0, so EI alone resumes. Literature is never a pseudo-observation and priors never see labels.
+and `gate` in [0, 1] is Phi(atanh(rho) * sqrt((m-3)/1.06)) for the Spearman rho between log pi
+and observed means over m unique conditions. It is a heuristic agreement score, NOT a
+calibrated probability: points are chosen adaptively and means are noisy. Disagreeing data
+drives the gate to 0, so EI alone resumes. Literature is never a pseudo-observation and priors never see labels.
 
 Within each worker process `loop.shortlist` is patched in scope only; `loop.run` is unchanged.
 Hidden table means are read by `score` after a run finishes, never by the policy.
@@ -202,6 +203,16 @@ def paired(diffs, rng):
     return d.mean(), d.std(ddof=1)/np.sqrt(len(d)) if len(d) > 1 else 0.0, *np.quantile(boot, [0.025, 0.975])
 
 
+def cluster(values, seeds, rng):
+    v, seeds = np.asarray(values), np.asarray(seeds)
+    ids = np.unique(seeds)
+    sums = np.array([v[seeds == i].sum() for i in ids])
+    counts = np.array([(seeds == i).sum() for i in ids])
+    pick = rng.integers(len(ids), size=(10000, len(ids)))
+    boot = sums[pick].sum(1) / counts[pick].sum(1)
+    return v.mean(), *np.quantile(boot, [0.025, 0.975])
+
+
 def summary(rows):
     rng = np.random.default_rng(0)
     key = lambda r: (r['env'], r['budget'], r['seed'])
@@ -223,8 +234,8 @@ def summary(rows):
               f'{np.mean([r["repeats"] for r in rs]):.1f} | {np.mean(gates) if gates else float("nan"):.2f} | '
               f'{np.mean(over):.1f} | {m:+.3f}+-{se:.3f} [{lo:+.3f},{hi:+.3f}] '
               f'{sum(x < 0 for x in d)}/{sum(x == 0 for x in d)}/{sum(x > 0 for x in d)}')
-    print('\nPooled over priors by post-hoc quality (seed x prior pairs), paired d(regret) vs baseline; '
-          'and gated-bounded on the same prior/seed:')
+    print('\nPooled over priors by post-hoc quality, paired d(regret) vs baseline and gated-bounded on the same '
+          'prior/seed; 95% CI = seed-cluster bootstrap (baseline and RNG are shared within a seed):')
     by = {}
     for r in rows:
         if r['prior'] is not None:
@@ -232,11 +243,13 @@ def summary(rows):
     pooled = {}
     for (env, budget, q, _, seed), v in by.items():
         pooled.setdefault((env, budget, q), []).append((v['bounded'] - base[(env, budget, seed)],
-                                                        v['gated'] - base[(env, budget, seed)], v['gated'] - v['bounded']))
+                                                        v['gated'] - base[(env, budget, seed)],
+                                                        v['gated'] - v['bounded'], seed))
     for (env, budget, q), v in sorted(pooled.items()):
         a = np.array(v)
-        s = [paired(a[:, j], rng) for j in range(3)]
-        print(f'{env} {budget} {q:13s} n={len(a):3d} | bounded {s[0][0]:+.3f} [{s[0][2]:+.3f},{s[0][3]:+.3f}] | '
+        s = [cluster(a[:, j], a[:, 3], rng) for j in range(3)]
+        s = [(m, None, lo, hi) for m, lo, hi in s]
+        print(f'{env} {budget} {q:13s} pairs={len(a):3d} seeds={len(set(a[:, 3]))} | bounded {s[0][0]:+.3f} [{s[0][2]:+.3f},{s[0][3]:+.3f}] | '
               f'gated {s[1][0]:+.3f} [{s[1][2]:+.3f},{s[1][3]:+.3f}] | gated-bounded {s[2][0]:+.3f} '
               f'[{s[2][2]:+.3f},{s[2][3]:+.3f}]')
 
