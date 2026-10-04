@@ -24,7 +24,7 @@ CPU_MODEL, CPU_FILE = 'ggml-org/gemma-4-E2B-it-GGUF', 'gemma-4-E2B-it-Q4_0.gguf'
 CPU_CORES, CPU_MEMORY_GIB, SLOTS = 8, 16, 4
 MODEL, REVISION, HARDWARE, USD_PER_S = {  # https://modal.com/pricing
     'gpu': (GPU_MODEL, GPU_REVISION, 'L40S', 0.000542),
-    'cpu': (f'{CPU_MODEL}/{CPU_FILE}', 'b4243c156154b6dca9324415f8c7ccc098b4aed1',
+    'cpu': (f'{CPU_MODEL}/{CPU_FILE}', 'unpinned: latest at run time (mutable llama.cpp image tag)',
             f'{CPU_CORES} CPU cores', CPU_CORES*0.0000131+CPU_MEMORY_GIB*0.00000222)}[BACKEND]
 MAX_TOKENS, ATTEMPTS, STARTUP_TIMEOUT = 1200, 3, 20*60
 CALL_TIMEOUT = {'gpu': 120, 'cpu': 600}[BACKEND]

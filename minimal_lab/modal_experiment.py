@@ -113,6 +113,13 @@ async def inspect_arm(args, base):
     """Same prompt/parser/validator through an Inspect provider (e.g. Anthropic), capped tokens."""
     from inspect_ai.model import GenerateConfig, get_model
     llm, calls = get_model(args.inspect_model), []
+    research = search if args.literature else None
+    if args.corpus:
+        corpus = json.loads(Path(args.corpus).read_text())
+        records = corpus['papers'] if isinstance(corpus, dict) else corpus
+
+        async def research(context):
+            return [dict(r) for r in records]
     config = GenerateConfig(temperature=0, max_tokens=1800, timeout=120, max_retries=3)
 
     async def generate(prompt):
@@ -123,8 +130,8 @@ async def inspect_arm(args, base):
         return dict(text=out.completion)
     start = time.monotonic()
     runs = list(await asyncio.gather(*[episode(s, args.budget, args.cv, text_chooser(generate),
-                                               search if args.literature else None) for s in args.seeds]))
-    return summary(base, runs, calls, dict(mode='LIVE Inspect provider'+' + Amass literature'*args.literature,
+                                               research) for s in args.seeds]))
+    return summary(base, runs, calls, dict(mode='LIVE Inspect provider'+' + Amass literature'*args.literature+f' + frozen corpus {args.corpus}'*bool(args.corpus),
                                            model=args.inspect_model,
                                            session_wall_s=time.monotonic()-start))
 
@@ -160,6 +167,7 @@ if __name__ == '__main__':
     parser.add_argument('--offline', action='store_true')
     parser.add_argument('--inspect-model', help='Inspect model ID instead of Modal')
     parser.add_argument('--literature', action='store_true', help='Amass search (needs AMASS_API_KEY)')
+    parser.add_argument('--corpus', help='JSON list of retained source records instead of live search')
     parser.add_argument('--out')
     args = parser.parse_args()
     report = asyncio.run(main(args))
