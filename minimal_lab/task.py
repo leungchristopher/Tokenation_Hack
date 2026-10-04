@@ -1,7 +1,7 @@
 """Inspect is the runner/scorer and optional LLM provider; the experiment loop is ordinary Python."""
 import json
 import os
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from inspect_ai import Task, task
@@ -80,15 +80,29 @@ def text_chooser(generate):
     return pick
 
 
+class ProviderStartupError(RuntimeError):
+    """Provider failed to start; each choice raises so loop.run records a numerical fallback."""
+
+
+def unavailable(reason):
+    async def pick(context):
+        raise ProviderStartupError(reason)
+    return pick
+
+
 @asynccontextmanager
 async def chooser(llm):
     """llm: False/None numerical, True/'inspect' Inspect model, 'modal' Modal open model."""
     if llm not in (False, None, True, 'inspect', 'modal'):
         raise ValueError("llm must be false, true, 'inspect' or 'modal'.")
     if llm == 'modal':
-        from minimal_lab import modal_model
-        async with modal_model.session() as client:
-            yield text_chooser(client)
+        async with AsyncExitStack() as stack:
+            try:
+                from minimal_lab import modal_model
+                pick = text_chooser(await stack.enter_async_context(modal_model.session()))
+            except Exception as error:
+                pick = unavailable(f'{type(error).__name__}: {error}')
+            yield pick
     else:
         yield choose if llm else None
 
