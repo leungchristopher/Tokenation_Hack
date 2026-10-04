@@ -4,11 +4,9 @@ from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
-from scipy.stats import norm
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import Matern, WhiteKernel
-
 from minimal_lab.evidence import prior_weights, validate_prior
+from minimal_lab.policy import shortlist, statistics
+from minimal_lab.context import graph_context
 
 
 def observed_means(observations):
@@ -17,61 +15,6 @@ def observed_means(observations):
         if o.get('ok', True) and o['value'] is not None:
             grouped.setdefault(o['candidate'], []).append(o['value'])
     return {i:float(np.mean(values)) for i,values in grouped.items()}
-
-
-def shortlist(X, observations, rng, direction=1, weights=None):
-    """EI, response exploration and an incumbent repeat. No literature pseudo-observations."""
-    good = [o for o in observations if o['value'] is not None]
-    span = np.ptp(X, axis=0)
-    scale = np.where(span > 0, span, 1)
-    Z = (X - X.min(0)) / scale
-    if not good:
-        ids = rng.choice(len(X), min(3, len(X)), replace=False).tolist()
-        if weights is not None:
-            preferred = int(np.argmax(weights))
-            ids = [preferred] + [i for i in ids if i != preferred]
-        return [dict(candidate=int(i), mean=None, sd=None, ei=None,
-                     reason=('Bounded literature prior initial candidate.' if weights is not None and i == ids[0]
-                             else 'Initial coverage: no response measurements yet.')) for i in ids], None
-    inputs = np.array([o['reported'] for o in good])
-    # Regress on reported delivery, not hidden realised settings or intended settings.
-    y = direction*np.array([o['value'] for o in good])
-    centre, spread = y.mean(), max(y.std(), 1.0)
-    gp = GaussianProcessRegressor(kernel=Matern(length_scale=0.3, nu=2.5)
-                                  + WhiteKernel(noise_level=0.05), optimizer=None)
-    gp.fit((inputs-X.min(0))/scale, (y-centre)/spread)
-    # First-order propagation of reported input uncertainty into response variance.
-    # This is an approximation, not a calibrated uncertain-input GP.
-    input_sd = np.array([o.get('report_sd', np.zeros(X.shape[1])) for o in good])/scale
-    training = (inputs-X.min(0))/scale
-    variance = np.zeros(len(good))
-    for j in range(X.shape[1]):
-        shift = np.zeros_like(training)
-        shift[:,j] = input_sd[:,j]
-        variance += ((gp.predict(training+shift)-gp.predict(training-shift))/2)**2
-    gp.alpha = 1e-8+variance
-    gp.fit(training, (y-centre)/spread)
-    mu, sd = gp.predict(Z, return_std=True)
-    # Acquisition needs uncertainty in the latent response, not irreducible reading noise.
-    # Otherwise a noisy incumbent can keep winning EI even after many repeats.
-    noise = getattr(getattr(getattr(gp, 'kernel_', None), 'k2', None), 'noise_level', 0.0)
-    sd = np.sqrt(np.maximum(sd**2 - noise, 0.0))
-    mu, sd = mu*spread+centre, sd*spread
-    means = observed_means(good)
-    incumbent = max(means, key=lambda i:direction*means[i])
-    delta = mu-direction*means[incumbent]
-    z = delta/np.maximum(sd, 1e-9)
-    ei = delta*norm.cdf(z) + sd*norm.pdf(z)
-    # An observation or deferral never proves a condition cannot improve.
-    choices = [(int(np.argmax(ei)), 'Highest expected improvement across all conditions; repeats allowed.'),
-               (int(np.argmax(sd)), 'Largest predictive uncertainty across all conditions; repeats allowed.'),
-               (incumbent, 'Repeat the best observed mean to check noise and delivery.')]
-    if weights is not None:
-        choices.insert(0, (int(np.argmax(ei * weights)),
-                           'Literature-weighted expected improvement; bounded, decaying prior.'))
-    unique = {i: why for i, why in reversed(choices)}
-    return [dict(candidate=i, mean=float(direction*mu[i]), sd=float(sd[i]), ei=float(ei[i]), reason=unique[i])
-            for i in dict(choices)], gp
 
 
 def validate_choice(reply, options, papers):
@@ -101,7 +44,7 @@ def validate_choice(reply, options, papers):
 
 async def run(X, names, execute, *, objective='observed reward proxy', goal='maximize',
               budget=12, seed=0, research=None, choose=None, on_event=lambda stage, graph: None,
-              make_prior=None, research_query=None, replicates=1, confirmation_replicates=1, previous=None):
+              make_prior=None, research_query=None, replicates=1, confirmation_replicates=1, previous=None, log_parameters=(), finalist_count=1, max_choice_calls=4, explain=None, require_prior=False):
     """execute(params) -> public observation. research/choose only receive public context."""
     if goal not in ('maximize', 'minimize'):
         raise ValueError('goal must be maximize or minimize.')
@@ -114,6 +57,9 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
         raise ValueError('One distinct parameter name per candidate column is required.')
     if len(np.unique(X, axis=0)) != len(X):
         raise ValueError('Candidate settings must be distinct; replicates reuse a candidate.')
+    if set(log_parameters) - set(names):
+        raise ValueError('Unknown log-scaled parameter.')
+    log_axes = tuple(names.index(p) for p in log_parameters)
     direction = 1 if goal == 'maximize' else -1
     rng = np.random.default_rng(seed)
     graph = {'nodes': [], 'edges': [], 'objective': objective, 'goal': goal, 'stop': 'running',
@@ -122,6 +68,7 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
     searches, check_id = 0, None
     prior, prior_id, pending = None, None, []
     iteration, confirmation_id = 0, None
+    finalists, choice_calls = [], 0
     if previous is not None:
         graph = deepcopy(previous['graph'])
         if (graph.get('parameters') != list(names) or graph.get('candidates') != X.tolist()
@@ -139,6 +86,7 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
         searches = 1 if papers else 0
         iteration = previous['result'].get('optimisation_iterations', 0)
         graph['stop'] = 'running'
+    graph['log_parameters'] = list(log_parameters)
     offset = len(observations)
     search_budget = budget - confirmation_replicates
 
@@ -157,8 +105,9 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
         edge(previous['graph']['nodes'][-1]['id'], root, 'Continue with all earlier measurements and evidence.')
     for step in range(budget):
         on_event('planning', graph)
-        options, gp = shortlist(X, observations, rng, direction)
+        options, gp = shortlist(X, observations, rng, direction, log_axes=log_axes)
         context = dict(objective=objective, goal=goal, parameters=names, research_query=research_query,
+                       log_parameters=list(log_parameters),
                        bounds={name:[float(X[:,j].min()), float(X[:,j].max())] for j,name in enumerate(names)}, options=[dict(o, params=dict(zip(names, X[o['candidate']].tolist())))
                                                   for o in options], history=observations)
         # Search once initially, once after a surprising result. A search must affect a future decision.
@@ -169,8 +118,9 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
                 found = await research(context)
                 for p in found:
                     p = dict(p)
-                    p['id'] = node('source', **{k:v for k,v in p.items() if k != 'id'})
+                    p['id'] = node('source', **{k:v for k,v in p.items() if k not in ('id','kind')})
                     papers.append(p)
+                    edge(root, p['id'], 'Retrieved literature; applicability must be assessed.')
                 if make_prior and papers:
                     proposal = await make_prior(dict(context, papers=papers))
                     if not proposal.get('belief'):
@@ -184,9 +134,11 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
             except Exception as error:
                 nid = node('search_failure', reason=type(error).__name__)
                 edge(root, nid, 'Retrieval or prior interpretation failed; continue with the last valid policy.')
+        if require_prior and not observations and prior is None:
+            raise ValueError('Literature mode requires a validated prior before the first experiment.')
         if prior is not None:
-            weights = prior_weights(X, names, prior['belief'], len(observations))
-            options, gp = shortlist(X, observations, rng, direction, weights=weights)
+            weights = prior_weights(X, names, prior['belief'], len(observations), log_axes=log_axes)
+            options, gp = shortlist(X, observations, rng, direction, weights=weights, log_axes=log_axes)
         planned_repeat = bool(pending)
         forced = pending.pop(0) if pending else check_id
         if forced is not None and forced not in {o['candidate'] for o in options}:
@@ -196,10 +148,12 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
         confirming = step >= search_budget and bool(good)
         if confirming:
             pending.clear()
-            if confirmation_id is None:
+            if not finalists:
                 means = observed_means(good)
-                confirmation_id = max(means, key=lambda i:direction*means[i])
-            forced = confirmation_id
+                rank = (lambda i: direction*gp.mean[i]) if gp is not None else (lambda i: direction*means[i])
+                finalists = sorted(means, key=rank, reverse=True)[:max(1, finalist_count)]
+                confirmation_id = finalists[0]
+            forced = finalists[(step-search_budget) % len(finalists)]
             if forced not in {o['candidate'] for o in options}:
                 options.append(dict(candidate=forced, mean=None, sd=None, ei=None,
                                     reason='Final confirmation group.'))
@@ -214,8 +168,9 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
                         alternatives={str(o['candidate']): 'Deferred under the numerical policy: '+o['reason']
                                       for o in options if o['candidate'] != default})
         context['options'] = [dict(o, params=dict(zip(names, X[o['candidate']].tolist()))) for o in options]
-        if choose and forced is None:
+        if choose and forced is None and (observations or prior is None) and choice_calls < max_choice_calls:
             try:
+                choice_calls += 1
                 decision = validate_choice(await choose(dict(context, papers=papers, prior=prior)), options, papers)
             except Exception as error:
                 decision['fallback'] = type(error).__name__
@@ -224,6 +179,32 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
             iteration += 1
             pending = [selected] * max(0, min(replicates - 1, search_budget - step - 1))
         phase = 'confirmation' if confirming else 'replicate' if planned_repeat else 'diagnostic' if forced is not None else 'proposal'
+        selected_option = next(o for o in options if o['candidate'] == selected)
+        source_ids = sorted({c['id'] for c in prior['citations']}) if prior else []
+        decision.update(source_ids=source_ids, prior_id=prior_id,
+                        predicted_mean=selected_option.get('mean'), latent_sd=selected_option.get('sd'),
+                        uncertainty_kind='Uncalibrated model SD for the mean recipe response; not replicate scatter.')
+        decision['policy_reason'] = decision['reason']
+        if explain:
+            try:
+                cited_sources = [dict(id=p['id'], title=p.get('title'),
+                    excerpts=[c['quote'] for c in (prior or {}).get('citations',[]) if c['id']==p['id']])
+                    for p in papers if p['id'] in source_ids]
+                note = await explain(dict(objective=objective, goal=goal, phase=phase,
+                    iteration=iteration, params=dict(zip(names,X[selected].tolist())),
+                    proposal=selected_option, policy_reason=decision['policy_reason'],
+                    recent=[dict(candidate=o['candidate'],value=o['value']) for o in observations[-6:]],
+                    candidate_statistics=statistics(observations).get(selected), sources=cited_sources,
+                    graph=graph_context(graph, observations, selected)))
+                if (not isinstance(note.get('reason'),str) or not note['reason'].strip()
+                        or not isinstance(note.get('uncertainty'),str) or not note['uncertainty'].strip()
+                        or not set(note.get('source_ids',[])).issubset(source_ids)):
+                    raise ValueError('Rationale requires grounded source IDs and explicit uncertainty.')
+                decision.update(reason=note['reason'], uncertainty=note['uncertainty'],
+                                rationale_source_ids=note.get('source_ids',[]), rationale_provider='LLM pre-execution interpretation')
+            except Exception as error:
+                decision['rationale_failure'] = type(error).__name__
+                decision['rationale_provider'] = 'Numerical policy fallback'
         d = node('decision', round=offset+step+1, iteration=iteration, phase=phase, **decision, options=context['options'])
         edge(root if not observations else observations[-1]['id'], d, 'Evidence available before selection.')
         if prior_id is not None:
@@ -239,9 +220,8 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
         for citation in decision['citations']:
             edge(citation['id'], branch_nodes[citation.get('candidate', selected)],
                  'Literature interpretation: '+citation['transfer_limit'])
-        for paper in papers:
-            if paper['id'] not in {c['id'] for c in decision['citations']}:
-                edge(paper['id'], d, 'Retrieved but not cited as a selection reason.')
+        for sid in decision.get('rationale_source_ids', []):
+            edge(sid, d, 'Cited in the pre-execution LLM interpretation; transfer remains uncertain.')
         # Decision is committed before execution. No result can rewrite its rationale.
         on_event('decision', graph)
         observation = dict(execute(dict(zip(names, X[selected].tolist()))))
@@ -263,13 +243,15 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
         observations.append(observation)
         check_id = None
         if gp is not None and observation['value'] is not None and forced is None:
-            train = [direction*o['value'] for o in observations[:-1] if o['value'] is not None]
-            z = (np.array(observation['reported'])-X.min(0))/np.where(np.ptp(X,axis=0)>0,np.ptp(X,axis=0),1)
-            mu, sd = gp.predict(z.reshape(1,-1), return_std=True)
-            residual = abs(direction*observation['value']-(mu[0]*max(np.std(train),1)+np.mean(train)))
-            if residual > 2*sd[0]*max(np.std(train),1):
-                check_id = selected
-                graph['nodes'][int(oid[1:])]['surprise'] = 'Outside pre-update 2-SD predictive interval; repeat before interpretation.'
+            residual = abs(observation['value']-gp.mean[selected])
+            predictive_sd = float(np.sqrt(gp.sd[selected]**2+gp.noise))
+            if residual > 2*predictive_sd:
+                # Already planned preparation repeats serve as the diagnostic.
+                check_id = selected if not pending else None
+                graph['nodes'][int(oid[1:])]['surprise'] = 'Outside approximate predictive band; check noise/model mismatch.'
+        summary = statistics(observations).get(selected)
+        if summary:
+            graph['nodes'][int(oid[1:])]['replicate_summary'] = summary
         on_event('observation', graph)
         if not observation.get('ok', True):
             graph['stop'] = 'Execution failed; no reward fabricated.'
@@ -277,19 +259,23 @@ async def run(X, names, execute, *, objective='observed reward proxy', goal='max
     if graph['stop'] == 'running':
         graph['stop'] = 'budget exhausted'
     means = observed_means(observations)
-    best = max(means, key=lambda i:direction*means[i]) if means else None
+    eligible = finalists or list(means)
+    best = max(eligible, key=lambda i:direction*means[i]) if eligible else None
     values = [o['value'] for o in observations if o['candidate'] == best and o['value'] is not None]
     sample_sd = float(np.std(values, ddof=1)) if len(values) > 1 else None
     result = dict(candidate=best, sample_sd=sample_sd,
                   optimisation_iterations=iteration, distinct_conditions=len(means),
                   confirmation_candidate=confirmation_id, confirmation_replicates=confirmation_replicates,
+                  finalists=finalists, choice_model_calls=choice_calls,
+                  finalist_statistics={i: statistics(observations)[i] for i in finalists},
+                  rationale_calls=sum(n['kind']=='decision' and n.get('rationale_provider')=='LLM pre-execution interpretation' for n in graph['nodes']),
                   standard_error=None if sample_sd is None else sample_sd / np.sqrt(len(values)),
                   requested_replicates=replicates,
                   replication_complete=len(values) >= replicates,
                   params=None if best is None else dict(zip(names, X[best].tolist())),
                   mean=None if best is None else means[best],
                   repeats=sum(o['candidate']==best and o['value'] is not None for o in observations),
-                  rule=f'{goal.capitalize()} mean observed proxy by intended parameters, including repeats.',
+                  rule=f'{goal.capitalize()} observed mean among confirmed finalists, including every preparation.',
                   uncertainty='Best observed proxy, not a verified objective or proven optimum. '
                   'Scatter and standard error assume independent preparations; they exclude systematic bias '
                   'and selection uncertainty. One confirmation cannot establish reproducibility.')

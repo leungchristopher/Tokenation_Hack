@@ -13,7 +13,7 @@ from bo_eval.env import get_env
 from minimal_lab.lab import Lab
 from minimal_lab.assays import recipe_for
 from minimal_lab.loop import run, save
-from minimal_lab.research import search, infer_prior
+from minimal_lab.research import search, infer_prior, explain
 
 
 async def choose(context):
@@ -50,9 +50,11 @@ def demo_solver(budget=12, seed=0, literature=False, llm=False, cv=0.15, out='lo
         try:
             episode = await run(env.X.copy(), env.params, lab, budget=budget, seed=seed,
                                 objective=env.description, goal=env.goal, on_event=on_event,
-                                research=search if literature else None, choose=choose if llm else None,
-                                make_prior=infer_prior if literature else None, replicates=replicates,
-                                confirmation_replicates=min(replicates, budget), previous=previous,
+                                research=search if literature else None, choose=None, explain=explain if llm else None,
+                                make_prior=infer_prior if literature else None, replicates=replicates, require_prior=literature,
+                                confirmation_replicates=min(max(replicates, budget//4), max(1,budget-1)), previous=previous,
+                                finalist_count=3, max_choice_calls=0,
+                                log_parameters=env.params if env_name == "zimmer_a549" else (),
                                 research_query=(
                                     'A549 taxol paclitaxel cisplatin doxorubicin three drug combination dose response optimisation'
                                     if env_name == 'zimmer_a549' else
@@ -94,7 +96,5 @@ def demo_scorer():
 @task
 def minimal_lab(budget: int=12, seed: int=0, literature: bool=False, llm: bool=False,
                 cv: float=0.15, out: str='logs/minimal', replicates: int=2, env: str='upo_abts'):
-    if literature and not llm:
-        raise ValueError('Literature mode requires llm=true so evidence can affect decisions.')
     return Task(dataset=[Sample(id=f'seed-{seed}', input=f'Optimise {get_env(env).description}.')],
                 solver=demo_solver(budget, seed, literature, llm, cv, out, replicates=replicates, env_name=env), scorer=demo_scorer())

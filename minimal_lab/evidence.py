@@ -16,6 +16,11 @@ def validate_prior(reply, names, X, papers):
     covered = set()
     for citation in citations:
         paper = sources.get(citation.get('id'))
+        quote = citation.get('quote', '')
+        if paper and quote and quote not in paper['abstract']:
+            trimmed = quote.rstrip('.!?;,:')
+            if trimmed and trimmed in paper['abstract']:
+                citation['quote'] = trimmed
         if (not paper or not citation.get('quote')
                 or citation['quote'] not in paper['abstract'] or not citation.get('transfer_limit')):
             raise ValueError('Prior evidence needs a retrieved quote and transfer limitation.')
@@ -28,8 +33,15 @@ def validate_prior(reply, names, X, papers):
     return {k: reply[k] for k in ('belief', 'citations', 'reason', 'uncertainty')}
 
 
-def prior_weights(X, names, belief, observations):
+def prior_weights(X, names, belief, observations, log_axes=()):
     """At most 4:1 preference initially; fades with measurements and never excludes a region."""
+    X = np.asarray(X, float).copy()
+    belief = dict(belief)
+    for j in log_axes:
+        X[:,j] = np.log10(X[:,j])
+        if names[j] in belief:
+            centre, width = belief[names[j]]
+            belief[names[j]] = (float(np.log10(centre)), width)
     logp = np.zeros(len(X))
     span = np.where(np.ptp(X, axis=0) > 0, np.ptp(X, axis=0), 1)
     for name, (centre, width) in belief.items():

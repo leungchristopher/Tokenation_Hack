@@ -130,7 +130,8 @@ def test_measured_non_incumbent_can_be_reconsidered(monkeypatch):
         def predict(self, X, return_std=False):
             mu, sd = np.array([0., 2., 0.]), np.array([1., 10., 1.])
             return (mu, sd) if return_std else mu
-    monkeypatch.setattr(loop, 'GaussianProcessRegressor', GP)
+    from minimal_lab import policy
+    monkeypatch.setattr(policy, 'GaussianProcessRegressor', GP)
     observations = [dict(candidate=i, value=v, reported=[float(i)], report_sd=[0.])
                     for i,v in enumerate([10., 1., 2.])]
     options, _ = loop.shortlist(np.array([[0.],[1.],[2.]]), observations, np.random.default_rng(0))
@@ -141,7 +142,7 @@ def test_measured_non_incumbent_can_be_reconsidered(monkeypatch):
 def test_deferral_revisited_and_confirmation_uses_mean(monkeypatch, goal, sign):
     from minimal_lab import loop
     options = [dict(candidate=i, mean=None, sd=None, ei=None, reason='Test option') for i in (0,1)]
-    monkeypatch.setattr(loop, 'shortlist', lambda *args: (options.copy(), None))
+    monkeypatch.setattr(loop, 'shortlist', lambda *args, **kwargs: (options.copy(), None))
     selections, results = iter([0,0,1]), iter([10.,2.,8.,8.])
     async def choose(context):
         pick = next(selections)

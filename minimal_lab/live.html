@@ -22,6 +22,13 @@ function show(id){const n=graph.nodes.find(n=>n.id===id);if(!n)return;
   const a=$('reason'),b=$('evidence');a.replaceChildren();b.replaceChildren();
   el('h2',n.kind==='decision'?`Iteration ${n.iteration??n.round} · ${n.phase??"proposal"} · C${n.selected}`:n.kind==='observation'?`Round ${n.round} · observed ${number(n.value)}`:n.kind==='recommendation'?'Recommended protocol':n.kind==='deferred'?`C${n.candidate} · deferred`:n.title||n.kind,a);
   el('p',n.reason||n.rule||n.abstract||'',a);el('p',n.uncertainty||n.status||'No independent confidence estimate is available.',b,'note');
+  if(n.policy_reason){el('h3','Numerical selection rule',a);el('p',n.policy_reason,a)}
+  if(n.rationale_provider)el('p',n.rationale_provider,b,'muted');
+  if(n.rationale_failure)el('p',`LLM explanation unavailable (${n.rationale_failure}); policy reason shown.`,b,'note');
+  if(n.latent_sd!=null)el('p',`Predicted mean ${number(n.predicted_mean)} · model SD ${number(n.latent_sd)} (uncalibrated uncertainty in the mean)`,b,'note');
+  if(n.source_ids?.length)el('p',`Literature prior source tags: ${n.source_ids.join(', ')}`,b);
+  if(n.replicate_summary)el('p',`Replicates n=${n.replicate_summary.n} · mean ${number(n.replicate_summary.mean)} · observed SD ${number(n.replicate_summary.sd)}`,b,'note');
+  if(n.belief)table(a,['Prior parameter','Centre / width'],Object.entries(n.belief).map(([k,v])=>[k,v.join(' / ')]));
   if(n.fallback)el('p',`LLM selection failed (${n.fallback}); numerical policy used.`,b,'note');
   if(n.surprise)el('p',n.surprise,b,'note');
   if(n.options){table(a,['Candidate','Predicted','SD','EI'],n.options.map(o=>['C'+o.candidate,number(o.mean),number(o.sd),number(o.ei)]));
@@ -32,6 +39,7 @@ function show(id){const n=graph.nodes.find(n=>n.id===id);if(!n)return;
   const related=graph.edges.filter(e=>e.target===n.id||e.source===n.id);
   const sourceIds=new Set(related.map(e=>e.source).filter(id=>graph.nodes.find(x=>x.id===id)?.kind==='source'));
   if(n.kind==='source')sourceIds.add(n.id);
+  for(const sid of n.source_ids||[])sourceIds.add(sid);
   el('h3','Literature attribution',b);
   if(!sourceIds.size)el('p','No literature source is attached to this node.',b);
   for(const sid of sourceIds){const s=graph.nodes.find(x=>x.id===sid),box=el('div',null,b,'evidence');
@@ -47,7 +55,7 @@ function draw(){const canvas=$('graph');canvas.replaceChildren();const positions
   const height=Math.max(300,...Object.values(positions).map(p=>p[1]+70));canvas.setAttribute('viewBox',`0 0 735 ${height}`);
   for(const e of graph.edges){const from=positions[e.source],to=positions[e.target];if(!from||!to)continue;const x=from[0]+85,y=from[1]+38,tx=to[0]+85,ty=to[1];svg('path',{d:`M${x},${y} C${x},${(y+ty)/2} ${tx},${(y+ty)/2} ${tx},${ty}`,class:'edge'+(to[0]===535?' deferred-edge':'')},canvas)}
   for(const n of graph.nodes){const p=positions[n.id];if(!p)continue;const g=svg('g',{class:'node',tabindex:0,role:'button','aria-label':n.kind+' '+n.id},canvas);const colour=n.kind==='decision'?'#deeee5':n.kind==='observation'?'#e6edf3':n.kind==='recommendation'?'#cce3d5':n.kind==='source'?'#f3ead7':'#f1f2ed';svg('rect',{x:p[0],y:p[1],width:180,height:40,rx:5,fill:colour,stroke:'#c3cec5'},g);
-    const label=n.kind==='decision'?`R${n.round} · choose C${n.selected}`:n.kind==='observation'?`Observed ${number(n.value)}`:n.kind==='deferred'?`C${n.candidate} · deferred`:n.kind==='source'?`Source ${n.id}`:n.kind==='recommendation'?`Recommend C${n.candidate}`:n.kind;
+    const label=n.kind==='decision'?`R${n.round} C${n.selected} [${(n.source_ids||[]).join(',')||'data'}]`:n.kind==='observation'?`Observed ${number(n.value)}`:n.kind==='deferred'?`C${n.candidate} · deferred`:n.kind==='source'?`Source ${n.id}`:n.kind==='recommendation'?`Recommend C${n.candidate}`:n.kind;
     svg('text',{x:p[0]+10,y:p[1]+25},g,label);svg('title',{},g,n.reason||n.title||n.uncertainty||'');g.onclick=()=>{pinned=n.id;show(n.id)};g.onkeydown=e=>{if(e.key==='Enter')g.onclick()};}
   const latest=graph.nodes.filter(n=>['decision','observation','recommendation'].includes(n.kind)).at(-1);show(pinned||latest?.id||graph.nodes[0].id);
   if(!pinned){const pane=canvas.parentElement;pane.scrollTop=pane.scrollHeight;}

@@ -14,6 +14,7 @@ if sys.platform.startswith('linux'):
 
 from minimal_lab.lab import Lab
 from minimal_lab.video import compose, WIDTH, HEIGHT
+from minimal_lab.landscape import render as render_landscape
 
 
 class RenderedLab(Lab):
@@ -22,6 +23,7 @@ class RenderedLab(Lab):
         import mujoco
         self.action, self.detail, self.decision = 'initialising', {}, None
         self.audit_graph = None
+        self.landscape_panel = None
         self.video, self.frame_count, self.timeline = None, 0, []
         self.video_path = Path(video_path) if video_path else None
         super().__init__(*args, on_action=self.action_event, **kwargs)
@@ -54,7 +56,7 @@ class RenderedLab(Lab):
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         robot_bgr = bgr
         bgr = compose(bgr, self.audit_graph, self.action, self.detail,
-                      self.recipe.name if self.recipe else 'UPO-ABTS')
+                      self.recipe.name if self.recipe else 'UPO-ABTS', self.landscape_panel)
         if self.video is not None:
             self.video.write(bgr)
         self.frame_count += 1
@@ -99,6 +101,8 @@ class Demo:
     def event(self, stage, graph):
         if self.lab is not None:
             self.lab.audit_graph = json.loads(json.dumps(graph))
+            if stage in ('decision', 'observation', 'recommendation'):
+                self.lab.landscape_panel = render_landscape(graph)
         if self.lab is not None and stage == 'decision':
             self.lab.decision = next(n['id'] for n in reversed(graph['nodes']) if n['kind'] == 'decision')
         if hasattr(self, 'output_dir'):
